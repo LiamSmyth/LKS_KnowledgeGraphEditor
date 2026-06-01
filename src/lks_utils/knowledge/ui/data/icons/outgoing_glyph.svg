@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 32" width="16" height="32">
+  <!-- Right curved bracket for outgoing connections - mirrors incoming to point away from root -->
+  <g transform="scale(-1, 1) translate(-16, 0)">
+    <path d="M 12 2 Q 4 2 4 16 Q 4 30 12 30" 
+          stroke="currentColor" 
+          stroke-width="2" 
+          fill="none" 
+          stroke-linecap="round" 
+          stroke-linejoin="round"/>
+  </g>
+</svg>

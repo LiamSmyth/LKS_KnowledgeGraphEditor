@@ -1,0 +1,67 @@
+{
+    "$schema": "../../../../profiling/perf_targets.schema.json",
+    "targets": {
+        "canvas2d.frame": {
+            "description": "Full canvas frame render at 1080p (pan/zoom gesture).",
+            "budget": {
+                "p95_ms": 16.6
+            },
+            "test_id": "src/lks_utils/gui_qt/canvas2d/test/perf_canvas_frame_test.py::test_canvas_frame_render_perf",
+            "scenario_callable": "lks_utils.gui_qt.canvas2d.scenarios.full_frame",
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "GPU"
+            ]
+        },
+        "canvas2d.overlay.render": {
+            "description": "Overlay composite pass over a populated scene.",
+            "budget": {
+                "p95_ms": 8.0
+            },
+            "test_id": "src/lks_utils/gui_qt/canvas2d/test/perf_overlay_test.py::test_overlay_render_perf",
+            "scenario_callable": "lks_utils.gui_qt.canvas2d.scenarios.overlay_render",
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "GPU"
+            ]
+        },
+        "canvas2d.init": {
+            "description": "Canvas2DWidget first-paint initialisation.",
+            "budget": {
+                "p95_ms": 500.0
+            },
+            "test_id": "src/lks_utils/gui_qt/canvas2d/test/perf_init_test.py::test_canvas_init_perf",
+            "scenario_callable": "lks_utils.gui_qt.canvas2d.scenarios.widget_init",
+            "surface_kind": "INIT",
+            "device_focus": [
+                "GPU"
+            ]
+        },
+        "pixmap_widget.paint_cached": {
+            "description": "Cached pixmap adapter paint path (drawPixmap only).",
+            "budget": {
+                "p95_ms": 0.5
+            },
+            "test_id": "src/lks_utils/gui_qt/canvas2d/test/canvas_widget_adapter_perf_test.py::test_canvas_pixmap_widget_item_perf",
+            "scenario_callable": "lks_utils.gui_qt.canvas2d.scenarios.pixmap_widget_paint_cached",
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU",
+                "GPU"
+            ]
+        },
+        "pixmap_widget.paint_cold": {
+            "description": "Cold pixmap adapter paint path (widget render + drawPixmap).",
+            "budget": {
+                "p95_ms": 5.0
+            },
+            "test_id": "src/lks_utils/gui_qt/canvas2d/test/canvas_widget_adapter_perf_test.py::test_canvas_pixmap_widget_item_perf",
+            "scenario_callable": "lks_utils.gui_qt.canvas2d.scenarios.pixmap_widget_paint_cold",
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU",
+                "GPU"
+            ]
+        }
+    }
+}

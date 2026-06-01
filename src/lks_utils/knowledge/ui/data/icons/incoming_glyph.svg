@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 32" width="16" height="32">
+  <!-- Left curved bracket for incoming connections (opens rightward inward) -->
+  <path d="M 12 2 Q 4 2 4 16 Q 4 30 12 30" 
+        stroke="currentColor" 
+        stroke-width="2" 
+        fill="none" 
+        stroke-linecap="round" 
+        stroke-linejoin="round"/>
+</svg>

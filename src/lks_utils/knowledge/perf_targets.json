@@ -1,0 +1,30 @@
+{
+    "$schema": "../../profiling/perf_targets.schema.json",
+    "targets": {
+        "knowledge.graph.render": {
+            "description": "Full knowledge graph render pass (200-node scene).",
+            "budget": {
+                "p95_ms": 16.6
+            },
+            "test_id": "src/lks_utils/knowledge/test/perf_graph_test.py::test_knowledge_graph_render_perf",
+            "scenario_callable": "lks_utils.knowledge.scenarios.graph_render",
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "GPU",
+                "CPU"
+            ]
+        },
+        "knowledge.node.lookup": {
+            "description": "Typed node lookup by ID through inheritance chain (1000-node repo).",
+            "budget": {
+                "p95_ms": 5.0
+            },
+            "test_id": "src/lks_utils/knowledge/test/perf_lookup_test.py::test_node_lookup_perf",
+            "scenario_callable": "lks_utils.knowledge.scenarios.node_lookup",
+            "surface_kind": "BATCH",
+            "device_focus": [
+                "CPU"
+            ]
+        }
+    }
+}
