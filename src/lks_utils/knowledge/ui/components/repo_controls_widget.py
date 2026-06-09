@@ -58,6 +58,12 @@ class QKnowledgeRepoControlsWidget(QWidget):
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._session.remove_listener(self._on_session_change)
+        try:
+            self._session.validation_index.validation_changed.disconnect(
+                self._on_validation_changed
+            )
+        except (TypeError, RuntimeError):
+            pass
         super().closeEvent(event)
 
     def _make_button(self, *, icon_name: str, action_id: str, tooltip: str) -> QPushButton:
@@ -97,6 +103,9 @@ class QKnowledgeRepoControlsWidget(QWidget):
         self._invalid_count_label.installEventFilter(self)
 
         self._session.add_listener(self._on_session_change)
+        self._session.validation_index.validation_changed.connect(
+            self._on_validation_changed
+        )
 
     # type: ignore[override]
     def eventFilter(self, watched: object, event: QEvent) -> bool:
@@ -160,41 +169,35 @@ class QKnowledgeRepoControlsWidget(QWidget):
             str(link_type.id): link_type.name
             for link_type in self._session.list_link_types()
         }
+        links_by_id = {str(link.id): link for link in self._session.list_links()}
 
-        for node in self._session.list_nodes():
-            object_id = str(node.id)
+        for object_id in self._session.validation_index.iter_invalid():
             status = self._session.validation_index.status_for(object_id)
-            if status.is_valid:
-                continue
             reason = status.reasons[0] if status.reasons else "invalid"
-            entries.append(f"Node: {node.name} ({reason})")
-
-        for link_type in self._session.list_link_types():
-            object_id = str(link_type.id)
-            status = self._session.validation_index.status_for(object_id)
-            if status.is_valid:
+            if object_id in node_names_by_id:
+                entries.append(f"Node: {node_names_by_id[object_id]} ({reason})")
                 continue
-            reason = status.reasons[0] if status.reasons else "invalid"
-            entries.append(f"Link Type: {link_type.name} ({reason})")
-
-        for link in self._session.list_links():
-            object_id = str(link.id)
-            status = self._session.validation_index.status_for(object_id)
-            if status.is_valid:
+            if object_id in link_type_names_by_id:
+                entries.append(
+                    f"Link Type: {link_type_names_by_id[object_id]} ({reason})"
+                )
                 continue
-            link_type_name = link_type_names_by_id.get(
-                str(link.link_type_id), str(link.link_type_id)
-            )
-            source_name = node_names_by_id.get(
-                str(link.source_node_id), str(link.source_node_id)
-            )
-            target_name = node_names_by_id.get(
-                str(link.target_node_id), str(link.target_node_id)
-            )
-            reason = status.reasons[0] if status.reasons else "invalid"
-            entries.append(
-                f"Link: {source_name} -> {target_name} [{link_type_name}] ({reason})"
-            )
+            link = links_by_id.get(object_id)
+            if link is not None:
+                link_type_name = link_type_names_by_id.get(
+                    str(link.link_type_id), str(link.link_type_id)
+                )
+                source_name = node_names_by_id.get(
+                    str(link.source_node_id), str(link.source_node_id)
+                )
+                target_name = node_names_by_id.get(
+                    str(link.target_node_id), str(link.target_node_id)
+                )
+                entries.append(
+                    f"Link: {source_name} -> {target_name} [{link_type_name}] ({reason})"
+                )
+                continue
+            entries.append(f"Asset: {object_id} ({reason})")
 
         if not entries:
             return 0, ""
@@ -208,6 +211,9 @@ class QKnowledgeRepoControlsWidget(QWidget):
     def _on_session_change(self, change_type: str) -> None:
         if change_type in {"node", "repo_loaded", "repo_saved", "dirty_changed"}:
             self._refresh_labels()
+
+    def _on_validation_changed(self, _changed_ids: object) -> None:
+        self._refresh_labels()
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(

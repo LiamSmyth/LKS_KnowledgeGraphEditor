@@ -34,9 +34,9 @@ from lks_utils.knowledge.default_theme import (
     VALIDATION_ERROR_TEXT,
 )
 from lks_utils.knowledge.canvas.canvas_io import CanvasIO
-from lks_utils.knowledge.io.knowledge_change_journal import (
-    journal_file_path,
-    read_change_events_since,
+from lks_utils.knowledge.io.knowledge_change_journal import journal_file_path
+from lks_utils.knowledge.io.knowledge_change_journal_dispatcher import (
+    KnowledgeChangeJournalDispatcher,
 )
 from lks_utils.knowledge.link_type_view_state import LinkTypeViewState
 from lks_utils.knowledge.links.link_instance import LinkInstance
@@ -72,7 +72,7 @@ from lks_utils.knowledge.ui.widgets.graph_canvas import (
     BatchPlacementPayload,
     estimate_graph_node_size_for_proxy,
 )
-from lks_utils.knowledge.ui.widgets.graph_node_canvas_item import QKnowledgeGraphNodeCanvasItem
+from lks_utils.knowledge.ui.widgets.graph_node_canvas_object import QKnowledgeGraphNodeCanvasObject
 from lks_utils.profiling import profile_action
 from lks_utils.gui_qt.base.async_task_runner import WorkerThread
 
@@ -200,10 +200,10 @@ def _flush_canvas_viewport_sidecar_write(self) -> None:
     repo_root = self._session.repository_root
     if repo_root is None:
         return
-    view_path = CanvasIO.graph_view_relpath(self._session._io, self._current_graph_view_id)  # noqa: SLF001
+    view_path = self._session.graph_view_relpath(self._current_graph_view_id)
     if view_path is None:
         return
-    canvas_io = CanvasIO(view_path=view_path, knowledge_io=self._session._io)  # noqa: SLF001
+    canvas_io = self._session.canvas_io_for(view_path)
 
     view = self._canvas.view()
     viewport_width = max(1.0, float(self._canvas.width()))
@@ -224,7 +224,7 @@ def _flush_canvas_viewport_sidecar_write(self) -> None:
 
     visible_node_ids = sorted(
         local_id
-        for local_id, item in self._canvas._local_node_items.items()  # noqa: SLF001
+        for local_id, item in self._canvas._local_node_objects.items()  # noqa: SLF001
         if not (
             item.bounds().x1 < min_x
             or item.bounds().x0 > max_x
@@ -237,7 +237,7 @@ def _flush_canvas_viewport_sidecar_write(self) -> None:
             "width": float(item.bounds().width),
             "height": float(item.bounds().height),
         }
-        for local_id, item in self._canvas._local_node_items.items()  # noqa: SLF001
+        for local_id, item in self._canvas._local_node_objects.items()  # noqa: SLF001
     }
     selected_local_ids = sorted(self._selected_graph_node_local_ids())
 
@@ -264,6 +264,9 @@ def _flush_canvas_viewport_sidecar_write(self) -> None:
                 "device_pixel_ratio": float(self._canvas.devicePixelRatioF()),
             },
             node_world_sizes=node_world_sizes,
+        )
+        self._record_own_viewport_sidecar_write(
+            view_path.with_name(f"{view_path.stem}_viewport.json")
         )
 
 
@@ -314,7 +317,7 @@ def _on_revert(self) -> None:
     try:
         root = self._session.repository_root
         if root is not None:
-            rel_path_path = CanvasIO.graph_view_relpath(self._session._io, graph_id)  # noqa: SLF001
+            rel_path_path = self._session.graph_view_relpath(graph_id)
             rel_path = None
             if rel_path_path is not None:
                 rel_path = rel_path_path.relative_to(root.resolve()).as_posix()
@@ -343,6 +346,11 @@ def _on_dirty_changed(self, _is_dirty: bool) -> None:
 
 def _on_session_change(self, event: SessionChangeEvent | str) -> None:
     change_type = event if isinstance(event, str) else event.change_type
+    event_origin = (
+        event.origin
+        if isinstance(event, SessionChangeEvent) and event.origin is not None
+        else None
+    )
     with profile_action(
         "knowledge.graph_tab.session_change",
         phase="apply",
@@ -359,64 +367,79 @@ def _on_session_change(self, event: SessionChangeEvent | str) -> None:
             return
         if change_type == "repo_loaded":
             self._configure_repo_watcher()
+            if self._current_graph_view is not None:
+                self._refresh_graph_validation_badges()
         if change_type in {"repo_loaded", "graph_view"}:
             self._library.refresh()
             self.refresh_palettes()
         if change_type == "node":
             # Coalesce side-panel refreshes for node edits to avoid synchronous
             # splitter/layout pressure while Enter commits are still settling.
-            if getattr(self, "_skip_next_node_side_panel_refresh", False):
+            if event_origin in {"load", "new_repo"}:
+                pass
+            elif getattr(self, "_skip_next_node_side_panel_refresh", False):
                 self._skip_next_node_side_panel_refresh = False
             elif not _node_change_affects_graph_side_panels(self):
                 pass
             else:
                 self._schedule_node_side_panel_refresh_when_idle()
+        if (
+            change_type == "node"
+            and event_origin in {"io_delete_node_cascade", "io_delete_nodes", "delete_node"}
+            and self._current_graph_view is not None
+        ):
+            self._refresh_graph_validation_badges()
         if change_type == "node" and self._current_graph_view is not None:
-            targeted_refresh_ids = self._pending_targeted_node_refresh_ids
-            self._pending_targeted_node_refresh_ids = None
-            if not targeted_refresh_ids:
-                session_touched_ids = getattr(
-                    self._session,
-                    "current_change_touched_ids",
-                    None,
-                )
-                if session_touched_ids:
-                    loaded_node_ids = {
-                        proxy.global_id
-                        for proxy in self._current_graph_view.nodes.values()
-                    }
-                    targeted_refresh_ids = loaded_node_ids.intersection(
-                        session_touched_ids
-                    )
-            if targeted_refresh_ids:
-                nodes_by_id = {
-                    str(node.id): node for node in self._session.list_nodes()
-                }
-                self._canvas.refresh_loaded_nodes_fast(
-                    nodes_by_id=nodes_by_id,
-                    links_by_id=self._collect_links_by_id(),
-                    only_global_ids=targeted_refresh_ids,
-                )
+            if event_origin in {"load", "new_repo"}:
+                # Full reload paths already call set_graph_view / targeted refresh.
+                action_scope.add_metadata("skipped_canvas_refresh", event_origin)
             else:
-                loaded_node_ids = {
-                    proxy.global_id
-                    for proxy in self._current_graph_view.nodes.values()
-                }
-                if loaded_node_ids:
+                targeted_refresh_ids = self._pending_targeted_node_refresh_ids
+                self._pending_targeted_node_refresh_ids = None
+                if not targeted_refresh_ids:
+                    session_touched_ids = getattr(
+                        self._session,
+                        "current_change_touched_ids",
+                        None,
+                    )
+                    if session_touched_ids:
+                        loaded_node_ids = {
+                            proxy.global_id
+                            for proxy in self._current_graph_view.nodes.values()
+                        }
+                        targeted_refresh_ids = loaded_node_ids.intersection(
+                            session_touched_ids
+                        )
+                if targeted_refresh_ids:
                     nodes_by_id = {
                         str(node.id): node for node in self._session.list_nodes()
                     }
                     self._canvas.refresh_loaded_nodes_fast(
                         nodes_by_id=nodes_by_id,
                         links_by_id=self._collect_links_by_id(),
-                        only_global_ids=loaded_node_ids,
+                        only_global_ids=targeted_refresh_ids,
                     )
-                else:
-                    self._schedule_full_node_canvas_refresh_when_idle()
-            action_scope.add_metadata(
-                "targeted_refresh_count",
-                len(targeted_refresh_ids or set()),
-            )
+                elif event_origin == "notify_repository_mutated":
+                    loaded_node_ids = {
+                        proxy.global_id
+                        for proxy in self._current_graph_view.nodes.values()
+                    }
+                    if loaded_node_ids:
+                        nodes_by_id = {
+                            str(node.id): node
+                            for node in self._session.list_nodes()
+                        }
+                        self._canvas.refresh_loaded_nodes_fast(
+                            nodes_by_id=nodes_by_id,
+                            links_by_id=self._collect_links_by_id(),
+                            only_global_ids=loaded_node_ids,
+                        )
+                    else:
+                        self._schedule_full_node_canvas_refresh_when_idle()
+                action_scope.add_metadata(
+                    "targeted_refresh_count",
+                    len(targeted_refresh_ids or set()),
+                )
         if change_type in {"node", "repo_loaded", "graph_view", "dirty_changed"} and self._current_graph_view is not None:
             self._refresh_canvas_title(self._current_graph_view)
 
@@ -706,6 +729,13 @@ def _request_external_reload(self, *, immediate: bool) -> None:
 
 
 def _on_external_reload_poll_tick(self) -> None:
+    coordinator = getattr(self, "_live_reload_coordinator", None)
+    if coordinator is not None:
+        repo_root = self._session.repository_root
+        if repo_root is not None:
+            coordinator.poll_dispatcher_events(repo_root)
+    if self._try_apply_intent_reload_from_journal(set()):
+        return
     self._request_external_reload(immediate=False)
 
 
@@ -801,14 +831,14 @@ def _on_external_reload_scan_error(self, exc: Exception) -> None:
 
 
 def _is_canvas_interacting(self) -> bool:
-    dragging_items = bool(getattr(self._canvas, "_dragging_items", []))
+    dragging_objects = bool(getattr(self._canvas, "_dragging_objects", []))
     rubber_band_active = getattr(
         self._canvas, "_rubber_band_overlay", None) is not None
     multi_drag_active = getattr(
         self._canvas, "_active_multi_drag_payload", None) is not None
     link_target_mode = bool(
         getattr(self._canvas, "_link_creation_target_mode", False))
-    return dragging_items or rubber_band_active or multi_drag_active or link_target_mode
+    return dragging_objects or rubber_band_active or multi_drag_active or link_target_mode
 
 
 def _is_inspector_editing(self) -> bool:
@@ -830,6 +860,19 @@ def _mark_own_fs_write(self) -> None:
     self._suppress_external_reload_until = max(
         self._suppress_external_reload_until,
         time.monotonic() + _OWN_FS_WRITE_SUPPRESSION_SECONDS,
+    )
+
+
+def _record_own_viewport_sidecar_write(self, sidecar_path: Path) -> None:
+    """Advance the live-reload snapshot for a self-written viewport sidecar."""
+    try:
+        resolved = sidecar_path.resolve()
+        stat = resolved.stat()
+    except OSError:
+        return
+    self._known_repo_file_state[str(resolved)] = (
+        int(stat.st_mtime_ns),
+        int(stat.st_size),
     )
 
 
@@ -1058,7 +1101,7 @@ def _run_external_repo_reload_with_changed_files(self, changed_files: set[str]) 
             previous_view = self._current_graph_view
             self._session.load()
             try:
-                reloaded_view = CanvasIO.load_graph_view(self._session._io, self._current_graph_view_id)  # noqa: SLF001
+                reloaded_view = self._session.load_graph_view(self._current_graph_view_id)
             except KeyError:
                 action_scope.add_metadata("mode", "graph_missing")
                 return
@@ -1106,11 +1149,22 @@ def _publish_workbench_ui_event(
 
 
 def _seed_external_event_journal_offset(self, repo_root: Path) -> None:
-    path = journal_file_path(repo_root)
-    if not path.exists():
-        self._external_event_journal_offset = 0
-        return
-    self._external_event_journal_offset = path.stat().st_size
+    dispatcher = self._ensure_external_journal_dispatcher(repo_root)
+    dispatcher.seed_offset_to_end()
+    self._external_event_journal_offset = dispatcher.offset
+
+
+def _ensure_external_journal_dispatcher(self, repo_root: Path) -> KnowledgeChangeJournalDispatcher:
+    dispatcher = getattr(self, "_external_journal_dispatcher", None)
+    if dispatcher is not None and dispatcher.repo_root.resolve() == repo_root.resolve():
+        return dispatcher
+    dispatcher = KnowledgeChangeJournalDispatcher(
+        repo_root,
+        include_current_process=False,
+        get_current_process_id=lambda: os.getpid(),
+    )
+    self._external_journal_dispatcher = dispatcher
+    return dispatcher
 
 
 def _journal_changed_in_files(changed_files: set[str], repo_root: Path) -> bool:
@@ -1119,28 +1173,21 @@ def _journal_changed_in_files(changed_files: set[str], repo_root: Path) -> bool:
 
 
 def _read_new_journal_events(self, repo_root: Path) -> list[dict[str, object]]:
-    offset = int(getattr(self, "_external_event_journal_offset", 0))
-    next_offset, events = read_change_events_since(repo_root, offset=offset)
-    self._external_event_journal_offset = next_offset
+    dispatcher = self._ensure_external_journal_dispatcher(repo_root)
+    dispatcher.set_offset(
+        int(getattr(self, "_external_event_journal_offset", 0)))
+    events = dispatcher.poll_and_dispatch()
+    self._external_event_journal_offset = dispatcher.offset
     return events
 
 
 def _try_apply_intent_reload_from_journal(self, changed_files: set[str]) -> bool:
+    _ = changed_files
     repo_root = self._session.repository_root
     if repo_root is None:
         return False
-    if not self._journal_changed_in_files(changed_files, repo_root):
-        return False
 
-    events = self._read_new_journal_events(repo_root)
-    if not events:
-        return False
-
-    external_events = [
-        event
-        for event in events
-        if str(event.get("process_id", "")) != str(os.getpid())
-    ]
+    external_events = self._read_new_journal_events(repo_root)
     if not external_events:
         return False
 
@@ -1192,16 +1239,13 @@ def _merge_preserved_positions(old_view: GraphView, new_view: GraphView) -> Grap
 def _on_new_graph_view_requested(self) -> None:
     graph_name = "New Graph"
     try:
-        graph_name = CanvasIO.ensure_unique_graph_view_name(  # noqa: SLF001
-            self._session._io,
-            graph_name
-        )
+        graph_name = self._session.ensure_unique_graph_view_name(graph_name)
     except ValueError:
         pass
     new_view = GraphView(
         id=str(ULID()), name=graph_name, nodes={}, edges={})
     with self._own_repo_write_scope():
-        CanvasIO.save_graph_view(self._session._io, new_view)  # noqa: SLF001
+        self._session.save_graph_view(new_view)
     self._session.notify_repository_mutated("graph_view")
     self.set_graph_view(new_view, nodes_by_id={str(
         node.id): node for node in self._session.list_nodes()})
@@ -1212,7 +1256,7 @@ def _on_graph_view_renamed(self, view_id: str, _new_name: str) -> None:
         previous_positions: dict[str, tuple[float, float]] = {}
         if self._current_graph_view is not None:
             for local_id, proxy in self._current_graph_view.nodes.items():
-                item = self._canvas._local_node_items.get(local_id)  # noqa: SLF001
+                item = self._canvas._local_node_objects.get(local_id)  # noqa: SLF001
                 if item is not None:
                     b = item.bounds()
                     previous_positions[local_id] = (b.x0, b.y0)
@@ -1283,6 +1327,7 @@ def install_drag_controller_helpers(cls) -> None:
     cls._is_inspector_editing = _is_inspector_editing
     cls._is_own_repo_write_active = _is_own_repo_write_active
     cls._mark_own_fs_write = _mark_own_fs_write
+    cls._record_own_viewport_sidecar_write = _record_own_viewport_sidecar_write
     cls._own_repo_write_scope = _own_repo_write_scope
     cls._apply_graph_repo_mutation = _apply_graph_repo_mutation
     cls._discover_watch_directories = staticmethod(_discover_watch_directories)
@@ -1301,6 +1346,7 @@ def install_drag_controller_helpers(cls) -> None:
     cls._seed_external_event_journal_offset = _seed_external_event_journal_offset
     cls._journal_changed_in_files = staticmethod(_journal_changed_in_files)
     cls._read_new_journal_events = _read_new_journal_events
+    cls._ensure_external_journal_dispatcher = _ensure_external_journal_dispatcher
     cls._try_apply_intent_reload_from_journal = _try_apply_intent_reload_from_journal
     cls._merge_preserved_positions = staticmethod(_merge_preserved_positions)
     cls._on_new_graph_view_requested = _on_new_graph_view_requested

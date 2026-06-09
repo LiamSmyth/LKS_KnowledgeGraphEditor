@@ -60,7 +60,7 @@ import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from lks_utils.gui_qt.canvas2d.canvas2d_renderer import FrameTimings
+    from lks_utils.gui_qt.canvas2d.render.canvas_renderer import FrameTimings
 
 
 class QtPaintProfileMixin:
@@ -148,7 +148,7 @@ class QtPaintProfileMixin:
                 existing_names = {o.name for o in timings.overlay_timings}
                 if "Qt GL compose/flush" not in existing_names:
                     # Lazy import to avoid circular-import at module level.
-                    from lks_utils.gui_qt.canvas2d.canvas2d_renderer import (
+                    from lks_utils.gui_qt.canvas2d.render.canvas_renderer import (
                         OverlayTiming,
                     )
                     timings.overlay_timings.append(
@@ -167,7 +167,7 @@ class QtPaintProfileMixin:
         else:
             # Widget has no renderer — create a minimal synthetic record so
             # the profiler has something to display (total_ms only).
-            from lks_utils.gui_qt.canvas2d.canvas2d_renderer import FrameTimings as _FT
+            from lks_utils.gui_qt.canvas2d.render.canvas_renderer import FrameTimings as _FT
             self._qt_prof_timings = _FT(
                 frame_timestamp=t1,
                 total_ms=outer_ms,

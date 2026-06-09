@@ -35,6 +35,8 @@ from lks_utils.knowledge.models.node import Node
 from lks_utils.knowledge.models.node_id import NodeId
 from lks_utils.knowledge.operations.delete_safety_analyzer import analyze_delete_impact
 from lks_utils.knowledge.data_interface.link_mutation_bridge import LinkMutationBridge
+from lks_utils.knowledge._editor_session.selection import resolve_ref_type_to_type_ids
+from lks_utils.knowledge.models.type import is_type
 from lks_utils.knowledge.ui.graph_link_creation_state_machine import (
     GraphLinkCreationEvent,
     GraphLinkCreationState,
@@ -50,7 +52,7 @@ from lks_utils.knowledge.ui.widgets.graph_canvas import (
     BatchPlacementPayload,
     estimate_graph_node_size_for_proxy,
 )
-from lks_utils.knowledge.ui.widgets.graph_node_canvas_item import QKnowledgeGraphNodeCanvasItem
+from lks_utils.knowledge.ui.widgets.graph_node_canvas_object import QKnowledgeGraphNodeCanvasObject
 from lks_utils.gui_qt.base.async_task_runner import WorkerThread
 
 
@@ -60,6 +62,13 @@ def _node_category_for_link_validation(self, node_id: str) -> str | None:
     except KeyError:
         return None
     return node.category
+
+
+def _node_for_link_validation(self, node_id: str) -> Node | None:
+    try:
+        return self._session.get_node(node_id)
+    except KeyError:
+        return None
 
 
 def _on_link_source_drag_started(self, link_type_id: str) -> None:
@@ -225,14 +234,17 @@ def _commit_link_creation(self, link_type_id: str, target_node_id: str) -> None:
     link = None
     link_created = False
     link_type = self._link_type_for_id(link_type_id)
-    link_bridge = LinkMutationBridge(self._session._io)  # noqa: SLF001
+    link_bridge = LinkMutationBridge(self._session.knowledge_io)  # noqa: SLF001
     try:
-        link = link_bridge.create_ad_hoc_link(
+        link, io_result = link_bridge.create_ad_hoc_link(
             link_type_id=link_type_id,
             source_node_id=source_node_id,
             target_node_id=target_node_id,
         )
         link_created = True
+        if io_result is not None:
+            self._session.absorb_io_operation_result(
+                io_result, change_type="link", origin="graph_tab_link_create")
     except ValueError as exc:
         if "Duplicate link triple" in str(exc):
             link = self._find_existing_link(
@@ -254,9 +266,6 @@ def _commit_link_creation(self, link_type_id: str, target_node_id: str) -> None:
     self._current_graph_view = new_view
     self._current_graph_view_id = str(new_view.id)
     self._persist_graph_view(new_view)
-    if link_created:
-        self._session.notify_io_mutation("link")
-
     # Fast path: add the single edge to canvas without full rebuild.
     # This avoids clearing all graph items and rebuilding everything.
     self._canvas.add_edge_item_fast(
@@ -325,8 +334,8 @@ def _is_link_allowed(
 
     Returns True if:
     - Link type exists
-    - Source node exists and passes source category constraint
-    - Target node exists and passes target category constraint
+    - Source node exists and passes source type constraint
+    - Target node exists and passes target type constraint
     - Target != source (no self-loops)
     - No existing link with same type in same direction (duplicate prevention)
     """
@@ -338,20 +347,20 @@ def _is_link_allowed(
     if link_type is None:
         return False
 
-    source_category = self._node_category_for_link_validation(source_node_id)
-    if source_category is None:
+    source_node = self._node_for_link_validation(source_node_id)
+    if source_node is None:
         return False
-    if not self._matches_category_constraint(
-        source_category,
+    if not self._matches_node_type_constraint(
+        source_node,
         link_type.source_type_constraint,
     ):
         return False
 
-    target_category = self._node_category_for_link_validation(target_node_id)
-    if target_category is None:
+    target_node = self._node_for_link_validation(target_node_id)
+    if target_node is None:
         return False
-    if not self._matches_category_constraint(
-        target_category,
+    if not self._matches_node_type_constraint(
+        target_node,
         link_type.target_type_constraint,
     ):
         return False
@@ -367,11 +376,11 @@ def _is_valid_source_candidate(self, link_type_id: str, node_id: str) -> bool:
     link_type = self._link_type_for_id(link_type_id)
     if link_type is None:
         return False
-    node_category = self._node_category_for_link_validation(node_id)
-    if node_category is None:
+    node = self._node_for_link_validation(node_id)
+    if node is None:
         return False
-    return self._matches_category_constraint(
-        node_category,
+    return self._matches_node_type_constraint(
+        node,
         link_type.source_type_constraint,
     )
 
@@ -396,8 +405,35 @@ def _matches_category_constraint(category: str, constraint: str | None) -> bool:
     return category.casefold() == normalized
 
 
+def _matches_node_type_constraint(self, node: Node, constraint: str | None) -> bool:
+    if constraint is None or not constraint.strip():
+        return True
+    normalized = constraint.strip().casefold()
+    if normalized == "any":
+        return True
+    if normalized == "type":
+        return is_type(node)
+    if normalized == "instance":
+        return not is_type(node)
+
+    allowed_type_ids = resolve_ref_type_to_type_ids(
+        iter_types=list(self._session.iter_types()),
+        token=normalized,
+        iter_links=self._session.list_links(),
+        iter_link_types=self._session.list_link_types(),
+    )
+    if not allowed_type_ids:
+        return False
+
+    if node.type_id is not None and str(node.type_id) in allowed_type_ids:
+        return True
+    if is_type(node) and str(node.id) in allowed_type_ids:
+        return True
+    return False
+
+
 def _clear_link_source_candidate_modulation(self) -> None:
-    for item in self._canvas._local_node_items.values():  # noqa: SLF001
+    for item in self._canvas._local_node_objects.values():  # noqa: SLF001
         item.clear_visual_modulation()
     self._canvas.update()
 
@@ -408,7 +444,7 @@ def _apply_link_source_candidate_modulation(self) -> None:
         self._clear_link_source_candidate_modulation()
         return
     hover_node_id = self._link_creation_hover_node_id
-    for item in self._canvas._local_node_items.values():  # noqa: SLF001
+    for item in self._canvas._local_node_objects.values():  # noqa: SLF001
         valid = self._is_valid_source_candidate(link_type_id, item.node_id)
         if not valid:
             item.set_visual_modulation(opacity=0.42)
@@ -432,7 +468,7 @@ def _apply_link_target_candidate_modulation(self) -> None:
         self._clear_link_source_candidate_modulation()
         return
     hover_node_id = self._link_creation_hover_node_id
-    for item in self._canvas._local_node_items.values():  # noqa: SLF001
+    for item in self._canvas._local_node_objects.values():  # noqa: SLF001
         if item.node_id == source_id:
             item.clear_visual_modulation()
             continue
@@ -476,8 +512,10 @@ def install_link_router_helpers(cls) -> None:
     cls._is_valid_source_candidate = _is_valid_source_candidate
     cls._is_valid_target_candidate = _is_valid_target_candidate
     cls._node_category_for_link_validation = _node_category_for_link_validation
+    cls._node_for_link_validation = _node_for_link_validation
     cls._matches_category_constraint = staticmethod(
         _matches_category_constraint)
+    cls._matches_node_type_constraint = _matches_node_type_constraint
     cls._clear_link_source_candidate_modulation = _clear_link_source_candidate_modulation
     cls._apply_link_source_candidate_modulation = _apply_link_source_candidate_modulation
     cls._apply_link_target_candidate_modulation = _apply_link_target_candidate_modulation

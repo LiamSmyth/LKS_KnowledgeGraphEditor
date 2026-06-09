@@ -60,13 +60,49 @@ class QNodeHeaderRibbonWidget(QFrame):
         self._subtitle_label.setVisible(bool(value))
 
     def set_ribbon_background(self, color: QColor) -> None:
+        self.set_ribbon_style(background=color)
+
+    def set_ribbon_style(
+        self,
+        *,
+        background: QColor,
+        separator: QColor | None = None,
+        title_color: QColor | None = None,
+        subtitle_color: QColor | None = None,
+    ) -> None:
+        separator_css = (
+            f"border-bottom: 1px solid {separator.name()};"
+            if separator is not None
+            else ""
+        )
+        title_css = (
+            f"color: {title_color.name()};"
+            if title_color is not None
+            else ""
+        )
+        subtitle_css = (
+            f"color: {subtitle_color.name()};"
+            if subtitle_color is not None
+            else ""
+        )
         self.setStyleSheet(
             "#node_header_ribbon {"
-            f"background: {color.name()};"
+            f"background: {background.name()};"
             "border: none;"
             "border-top-left-radius: 5px;"
             "border-top-right-radius: 5px;"
+            f"{separator_css}"
             "}"
+            + (
+                f"#node_header_ribbon QLabel#title {{{title_css}}}"
+                if title_css
+                else ""
+            )
+            + (
+                f"#node_header_ribbon QLabel#subtitle {{{subtitle_css}}}"
+                if subtitle_css
+                else ""
+            )
         )
 
     def clear_action_widgets(self) -> None:

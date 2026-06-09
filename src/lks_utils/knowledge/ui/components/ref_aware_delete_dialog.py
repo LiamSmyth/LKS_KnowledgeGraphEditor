@@ -268,7 +268,7 @@ class QKnowledgeRefAwareDeleteDialog(QDialogScaffoldBase):
     def _coerce_impact(self, target_or_impact: Node | DeleteImpact) -> DeleteImpact:
         if isinstance(target_or_impact, DeleteImpact):
             return target_or_impact
-        return self._session._io.preview_delete_nodes([str(target_or_impact.id)])  # noqa: SLF001
+        return self._session.preview_delete_nodes([str(target_or_impact.id)])  # noqa: SLF001
 
     def _header_text(self) -> str:
         incoming_count = len(self._impact.incoming_refs)
@@ -443,14 +443,13 @@ class QKnowledgeRefAwareDeleteDialog(QDialogScaffoldBase):
         _ = label
         if self._apply_resolution_delegate is None:
             try:
-                result = self._session._io.delete_nodes(  # noqa: SLF001
+                result = self._session.io_delete_nodes(
                     list(self._impact.targets),
                     resolution=resolution,
                 )
                 if not result.ok:
                     raise ValueError(
                         result.error_message or "Delete operation failed")
-                self._session.notify_io_mutation("node")
                 self._accepted_resolution = resolution
                 return
             except Exception:  # noqa: BLE001
@@ -463,25 +462,22 @@ class QKnowledgeRefAwareDeleteDialog(QDialogScaffoldBase):
                         resolution=resolution,
                     )
 
-                fallback_result = self._session._io.apply_op(  # noqa: SLF001
+                fallback_result = self._session.io_apply_op(
                     _fallback_mutate,
                 )
                 if not fallback_result.ok:
                     raise ValueError(
                         fallback_result.error_message or "Delete operation failed"
                     )
-                self._session.notify_io_mutation("node")
                 self._accepted_resolution = resolution
                 return
 
         def _mutate(repository: Repository) -> set[str]:
             return self._apply_resolution_delegate(repository, self._impact, resolution)
 
-        result = self._session._io.apply_op(_mutate)  # noqa: SLF001
+        result = self._session.io_apply_op(_mutate)
         if not result.ok:
             raise ValueError(result.error_message or "Delete operation failed")
-        change_type = "link_type" if self._entity_kind == "link_type" else "node"
-        self._session.notify_io_mutation(change_type)
         self._accepted_resolution = resolution
 
     def _on_safe_delete(self) -> None:

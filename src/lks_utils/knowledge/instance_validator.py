@@ -187,6 +187,23 @@ class InstanceValidator:
         for slot in slots:
             value = props.get(slot.name)
             value_mode = slot.effective_value_mode()
+
+            if value_mode == PropertyValueMode.REF_OR_INLINE:
+                target_ids = self._slot_ref_targets(
+                    node_id=node_id, slot_name=slot.name)
+                if target_ids:
+                    self._validate_reference_target(
+                        slot, target_ids[0], field=slot.name)
+                    continue
+                if value is None:
+                    if slot.required:
+                        raise ValueError(
+                            f"Required property {slot.name!r} is empty")
+                    continue
+                # Inline payloads are allowed for REF_OR_INLINE when no
+                # slot_ref link exists.
+                continue
+
             if value_mode.allows_reference:
                 target_ids = self._slot_ref_targets(
                     node_id=node_id, slot_name=slot.name)

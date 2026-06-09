@@ -46,6 +46,48 @@ def get_repo_schema_summary_impl(path: str) -> dict[str, Any]:
     return io.get_repo_schema_summary()
 
 
+def get_repo_inventory_impl(
+    path: str,
+    mode: str = "compact",
+) -> dict[str, Any]:
+    """Return token-efficient repo inventory with lineage context."""
+    io = _build_io(path)
+    return io.get_repo_inventory(mode=mode)
+
+
+def list_instances_grouped_by_type_impl(
+    path: str,
+    mode: str = "compact",
+) -> list[dict[str, Any]]:
+    """Return instances grouped by resolved type for quick duplicate checks."""
+    io = _build_io(path)
+    return io.list_instances_grouped_by_type(mode=mode)
+
+
+def suggest_existing_nodes_impl(
+    path: str,
+    name_query: str,
+    *,
+    category: str | None = None,
+    type_query: str | None = None,
+    max_results: int = 20,
+) -> list[dict[str, Any]]:
+    """Return compact node suggestions before creating a new node."""
+    io = _build_io(path)
+    return io.suggest_existing_nodes(
+        name_query,
+        category=category,
+        type_query=type_query,
+        max_results=max_results,
+    )
+
+
+def get_instance_bases_impl(path: str, instance_id: str) -> dict[str, Any]:
+    """Return one instance's resolved schema/base lineage."""
+    io = _build_io(path)
+    return io.get_instance_bases(instance_id)
+
+
 def list_instances_of_type_query_impl(
     path: str,
     type_query: str,
@@ -171,6 +213,33 @@ def query_nodes_impl(
 
 def register_schema_tools(mcp: FastMCP) -> None:
     @mcp.tool()
+    def get_repo_inventory(path: str, mode: str = "compact") -> dict[str, Any]:
+        """[READ-ONLY] Return low-noise inventory: types, instances, link-types (+ lineage)."""
+        return get_repo_inventory_impl(path, mode)
+
+    @mcp.tool()
+    def list_instances_grouped_by_type(path: str, mode: str = "compact") -> list[dict[str, Any]]:
+        """[READ-ONLY] Return instance rows grouped by type for dedupe/exploration loops."""
+        return list_instances_grouped_by_type_impl(path, mode)
+
+    @mcp.tool()
+    def suggest_existing_nodes(
+        path: str,
+        name_query: str,
+        category: str | None = None,
+        type_query: str | None = None,
+        max_results: int = 20,
+    ) -> list[dict[str, Any]]:
+        """[READ-ONLY] Suggest likely existing nodes to avoid duplicate creations."""
+        return suggest_existing_nodes_impl(
+            path,
+            name_query,
+            category=category,
+            type_query=type_query,
+            max_results=max_results,
+        )
+
+    @mcp.tool()
     def get_repo_schema_summary(path: str) -> dict[str, Any]:
         """[READ-ONLY] Return all type slots and link types in one call."""
         return get_repo_schema_summary_impl(path)
@@ -226,6 +295,16 @@ def register_schema_tools(mcp: FastMCP) -> None:
         """[READ-ONLY] Return effective props with inheritance scope metadata."""
         io = _build_io(path)
         return io.get_effective_props(instance_id)
+
+    @mcp.tool()
+    def get_instance_bases(path: str, instance_id: str) -> dict[str, Any]:
+        """[READ-ONLY] Return an instance's resolved type and prototype lineage.
+
+        Useful for answering:
+        - what schema/type does this instance inherit from?
+        - which prototype instances are in its fallback chain?
+        """
+        return get_instance_bases_impl(path, instance_id)
 
     @mcp.tool()
     def get_parent_chain(path: str, type_id: str) -> list[dict[str, Any]]:

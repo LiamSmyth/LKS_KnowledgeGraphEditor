@@ -1,8 +1,7 @@
 """Reusable Canvas2D table-rows painter for node-like card items.
 
-Row text is centred vertically using Qt's ``AlignVCenter`` flag — exactly like
-:class:`CanvasNodeHeaderPainter` — so there is no manual baseline arithmetic
-and no risk of glyph ascenders escaping their slot.
+Row text is centred vertically using Qt's ``AlignVCenter`` flag so there is
+no manual baseline arithmetic and no risk of glyph ascenders escaping their slot.
 
 Layout in a Y-up canvas::
 
@@ -25,7 +24,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPen, QTextLayout, QTextOption
 
 if TYPE_CHECKING:
-    from lks_utils.gui_qt.canvas2d.canvas_paint_context import CanvasPaintContext
+    from lks_utils.gui_qt.canvas2d.render.canvas_paint_context import CanvasPaintContext
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Column descriptor
@@ -71,7 +70,7 @@ class CanvasTableCellStyle:
 class CanvasTableRowsPainter:
     """Paint equal-height rows with inter-row separator lines in a Y-up canvas.
 
-    Usage pattern mirrors :class:`CanvasNodeHeaderPainter`::
+    Usage pattern mirrors other gui_qt row/header painters::
 
         painter = CanvasTableRowsPainter(row_height=20.0, font_px=11)
         painter.paint_rows(ctx, panel_rect=panel, columns=cols, rows=data)
@@ -192,7 +191,7 @@ class CanvasTableRowsPainter:
 
                 # Translate to visual top of the row slot, flip Y so that
                 # y=0 is the slot's visual top and y=h is the slot's visual
-                # bottom — the same trick CanvasNodeHeaderPainter uses.
+                # bottom — centred via AlignVCenter in the clip rect.
                 # Qt's AlignVCenter then handles font-metric centering
                 # without any manual baseline arithmetic.
                 painter.translate(col_x + column.x_pad, row_top)

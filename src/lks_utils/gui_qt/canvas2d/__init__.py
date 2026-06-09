@@ -1,20 +1,20 @@
 """Canvas2D foundation: a reusable Qt widget for unbounded 2-D viewports.
 
-`Canvas2D` provides pan / zoom / rotation, item placement, dirty
+`Canvas2D` provides pan / zoom / rotation, object placement, dirty
 tracking, and overlays. It knows nothing about tiles, brushes, or
-pixels — those concerns live in consumer-side `CanvasItem` subclasses.
+pixels — those concerns live in consumer-side `CanvasObject` subclasses.
 
 See ``docs/features/2026-04-29_canvas2d_foundation_feature_spec.md``.
 """
 from __future__ import annotations
 
-from lks_utils.gui_qt.canvas2d.actions import (
+from lks_utils.gui_qt.canvas2d.interaction.actions import (
     CANVAS_COPY,
     CANVAS_CUT,
     CANVAS_DELETE_SELECTED,
     CANVAS_DESELECT_ALL,
     CANVAS_FIT_CONTENT,
-    CANVAS_ITEM_DRAG,
+    CANVAS_OBJECT_DRAG,
     CANVAS_PAN,
     CANVAS_PASTE,
     CANVAS_PRIMARY,
@@ -29,31 +29,43 @@ from lks_utils.gui_qt.canvas2d.actions import (
     CANVAS_ZOOM_OUT,
     register_canvas2d_defaults,
 )
-from lks_utils.gui_qt.canvas2d.canvas2d_capabilities import Canvas2DCapabilities
-from lks_utils.gui_qt.canvas2d.command_history import CanvasCommand, CommandHistory
-from lks_utils.gui_qt.canvas2d.commands import (
-    AddItemCommand,
+from lks_utils.gui_qt.canvas2d.widgets.canvas_widget_policies import CanvasWidgetPolicies
+from lks_utils.gui_qt.canvas2d.canvas_objects.canvas_object_capability import CanvasObjectCapability
+from lks_utils.gui_qt.canvas2d.canvas_objects.canvas_object_capabilities import (
+    DragCapability,
+    ResizeRectCapability,
+    SelectableCapability,
+)
+from lks_utils.gui_qt.canvas2d.interaction.command_history import CommandHistory
+from lks_utils.gui_qt.canvas2d.interaction.canvas_command import CanvasCommand
+from lks_utils.gui_qt.canvas2d.interaction.canvas_commands import (
+    AddObjectCommand,
     CompositeCommand,
-    MoveItemsCommand,
-    RemoveItemCommand,
+    MoveObjectsCommand,
+    RemoveObjectCommand,
+    ResizeObjectCommand,
 )
-from lks_utils.gui_qt.canvas2d.canvas_document import CanvasDocument
-from lks_utils.gui_qt.canvas2d.canvas_input_event import CanvasInputEvent
-from lks_utils.gui_qt.canvas2d.canvas_item import CanvasItem
-from lks_utils.gui_qt.canvas2d.canvas_anchored_widget_item import CanvasAnchoredWidgetItem
-from lks_utils.gui_qt.canvas2d.canvas_pixmap_widget_item import CanvasPixmapWidgetItem
-from lks_utils.gui_qt.canvas2d.canvas_widget_adapter_base import CanvasWidgetAdapterBase
-from lks_utils.gui_qt.canvas2d.canvas_item_registry import (
-    canvas_item_type_name,
-    get_canvas_item_type,
-    register_canvas_item_type,
+from lks_utils.gui_qt.canvas2d.core.canvas_document import CanvasDocument
+from lks_utils.gui_qt.canvas2d.interaction.canvas_input_event import CanvasInputEvent
+from lks_utils.gui_qt.canvas2d.canvas_object import CanvasObject
+from lks_utils.gui_qt.canvas2d.canvas_objects.canvas_object_widget_adapter_anchored import CanvasAnchoredWidgetObject
+from lks_utils.gui_qt.canvas2d.canvas_objects.canvas_object_widget_adapter_pixmap import CanvasPixmapWidgetObject
+from lks_utils.gui_qt.canvas2d.canvas_objects.canvas_object_widget_adapter import CanvasObjectWidgetAdapter
+from lks_utils.gui_qt.canvas2d.canvas_object_registry import (
+    canvas_object_type_name,
+    get_canvas_object_type,
+    register_canvas_object_type,
 )
-from lks_utils.gui_qt.paint.node_header_band_painter import CanvasNodeHeaderPainter
-from lks_utils.gui_qt.canvas2d.canvas_paint_context import CanvasPaintContext
-from lks_utils.gui_qt.canvas2d.dirty_tracker import DirtyTracker
-from lks_utils.gui_qt.canvas2d.image_canvas_item import IMAGE_EXTENSIONS, ImageCanvasItem
-from lks_utils.gui_qt.canvas2d.view_transform import ViewTransform
-from lks_utils.gui_qt.canvas2d.viewport_overlay import ViewportOverlay
+from lks_utils.gui_qt.canvas2d.canvas_objects import (
+    CanvasNodeHeaderSpec,
+    CanvasNodeObject,
+    CanvasNodeObjectPixmap,
+)
+from lks_utils.gui_qt.canvas2d.render.canvas_paint_context import CanvasPaintContext
+from lks_utils.gui_qt.canvas2d.core.dirty_tracker import DirtyTracker
+from lks_utils.gui_qt.canvas2d.canvas_objects.canvas_object_image import IMAGE_EXTENSIONS, ImageCanvasObject
+from lks_utils.gui_qt.canvas2d.core.view_transform import ViewTransform
+from lks_utils.gui_qt.canvas2d.canvas_objects.canvas_object_overlay import ViewportOverlay
 from lks_utils.gui_qt.widgets.canvas_table_rows_painter import (
     CanvasTableColumn,
     CanvasTableRowsPainter,
@@ -62,23 +74,23 @@ from lks_utils.gui_qt.widgets.canvas_table_rows_painter import (
 # Widget import is optional (depends on PySide6 + moderngl). Don't fail
 # the package import if those are missing.
 try:
-    from lks_utils.gui_qt.canvas2d.camera2d import Camera2D
-    from lks_utils.gui_qt.canvas2d.canvas2d_renderer import FrameTimings, OverlayTiming
-    from lks_utils.gui_qt.canvas2d.canvas2d_gl_widget import (
+    from lks_utils.gui_qt.canvas2d.core.camera2d import Camera2D
+    from lks_utils.gui_qt.canvas2d.render.canvas_renderer import FrameTimings, OverlayTiming
+    from lks_utils.gui_qt.canvas2d.widgets.canvas_widget_gl import (
         Canvas2DGLWidget,
         HAS_CANVAS2D_GL,
     )
-    from lks_utils.gui_qt.canvas2d.canvas2d_gl_window_widget import (
+    from lks_utils.gui_qt.canvas2d.widgets.canvas_widgets.canvas_widget_gl_window import (
         Canvas2DGLWindowWidget,
         HAS_CANVAS2D_GL_WINDOW,
     )
-    from lks_utils.gui_qt.canvas2d.canvas2d_renderer import Canvas2DRenderer
-    from lks_utils.gui_qt.canvas2d.canvas2d_widget import Canvas2D, Canvas2DWidget
-    from lks_utils.gui_qt.canvas2d.minimap_widget import MinimapWidget
-    from lks_utils.gui_qt.canvas2d.overlays.color_backdrop import ColorBackdrop
-    from lks_utils.gui_qt.canvas2d.overlays.selection_overlay import SelectionOverlay
-    from lks_utils.gui_qt.canvas2d.scene2d import Scene2D
-    from lks_utils.gui_qt.canvas2d.selection_model import SelectionModel
+    from lks_utils.gui_qt.canvas2d.render.canvas_renderer import Canvas2DRenderer
+    from lks_utils.gui_qt.canvas2d.widgets.canvas_widget import Canvas2D, Canvas2DWidget
+    from lks_utils.gui_qt.canvas2d.widgets.canvas_widgets.widget_minimap import MinimapWidget
+    from lks_utils.gui_qt.canvas2d.canvas_objects.overlays.overlay_color_backdrop import ColorBackdrop
+    from lks_utils.gui_qt.canvas2d.canvas_objects.overlays.overlay_selection import SelectionOverlay
+    from lks_utils.gui_qt.canvas2d.core.scene2d import Scene2D
+    from lks_utils.gui_qt.canvas2d.core.selection_model import SelectionModel
     HAS_CANVAS2D: bool = True
 except ImportError:
     Camera2D = None  # type: ignore[assignment,misc]
@@ -102,19 +114,25 @@ except ImportError:
 __all__ = [
     "ViewTransform",
     "CanvasInputEvent",
-    "CanvasItem",
-    "CanvasAnchoredWidgetItem",
-    "CanvasPixmapWidgetItem",
-    "CanvasWidgetAdapterBase",
-    "CanvasNodeHeaderPainter",
+    "CanvasObject",
+    "CanvasAnchoredWidgetObject",
+    "CanvasPixmapWidgetObject",
+    "CanvasObjectWidgetAdapter",
+    "CanvasNodeHeaderSpec",
+    "CanvasNodeObject",
+    "CanvasNodeObjectPixmap",
     "CanvasTableColumn",
     "CanvasTableRowsPainter",
     "CanvasPaintContext",
-    "Canvas2DCapabilities",
+    "CanvasWidgetPolicies",
+    "CanvasObjectCapability",
     "CanvasCommand",
     "CanvasDocument",
     "CommandHistory",
     "CompositeCommand",
+    "DragCapability",
+    "ResizeRectCapability",
+    "SelectableCapability",
     "DirtyTracker",
     "ViewportOverlay",
     "Camera2D",
@@ -136,7 +154,7 @@ __all__ = [
     "CANVAS_PAN",
     "CANVAS_ZOOM_IN",
     "CANVAS_ZOOM_OUT",
-    "CANVAS_ITEM_DRAG",
+    "CANVAS_OBJECT_DRAG",
     "CANVAS_ROTATE",
     "CANVAS_RESET_VIEW",
     "CANVAS_FIT_CONTENT",
@@ -152,12 +170,13 @@ __all__ = [
     "CANVAS_UNDO",
     "CANVAS_REDO",
     "register_canvas2d_defaults",
-    "register_canvas_item_type",
-    "get_canvas_item_type",
-    "canvas_item_type_name",
-    "ImageCanvasItem",
+    "register_canvas_object_type",
+    "get_canvas_object_type",
+    "canvas_object_type_name",
+    "ImageCanvasObject",
     "IMAGE_EXTENSIONS",
-    "AddItemCommand",
-    "RemoveItemCommand",
-    "MoveItemsCommand",
+    "AddObjectCommand",
+    "RemoveObjectCommand",
+    "MoveObjectsCommand",
+    "ResizeObjectCommand",
 ]

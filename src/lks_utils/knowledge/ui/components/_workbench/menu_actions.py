@@ -17,6 +17,9 @@ from lks_utils.knowledge.actions import (
     SWITCH_TO_INSTANCES_TAB,
     SWITCH_TO_TYPES_TAB,
 )
+from lks_utils.knowledge.ui.components.autosave_preferences_widget import (
+    QKnowledgeAutosavePreferencesWidget,
+)
 from lks_utils.knowledge.ui.components.live_reload_preferences_widget import (
     QKnowledgeLiveReloadPreferencesWidget,
 )
@@ -66,10 +69,17 @@ def open_preferences_dialog(workbench: QKnowledgeWorkbenchWidget) -> None:
             settings_org=workbench._SETTINGS_ORG,
             settings_app=workbench._SETTINGS_APP,
         )
+        autosave_widget = QKnowledgeAutosavePreferencesWidget(
+            settings_org=workbench._SETTINGS_ORG,
+            settings_app=workbench._SETTINGS_APP,
+        )
         workbench._preferences_dialog = QPreferencesDialog(
             parent=workbench.window(),
             state_org=workbench._SETTINGS_ORG,
-            extra_tabs=(("Knowledge", live_reload_widget),),
+            extra_tabs=(
+                ("Knowledge", live_reload_widget),
+                ("Autosave", autosave_widget),
+            ),
         )
         workbench._preferences_dialog.finished.connect(
             workbench._on_preferences_dialog_closed)
@@ -80,6 +90,7 @@ def open_preferences_dialog(workbench: QKnowledgeWorkbenchWidget) -> None:
 
 def on_preferences_dialog_closed(workbench: QKnowledgeWorkbenchWidget) -> None:
     workbench._graph_tab.reload_live_reload_settings()
+    workbench._git_tab.reload_autosave_settings()
 
 
 def on_repo_new(workbench: QKnowledgeWorkbenchWidget) -> None:

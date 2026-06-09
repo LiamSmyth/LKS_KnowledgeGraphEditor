@@ -19,7 +19,7 @@ from lks_utils.knowledge.ui.components.ref_aware_delete_dialog import QKnowledge
 from lks_utils.knowledge.ui.components.ref_picker_dialog import QKnowledgeRefPickerDialog
 from lks_utils.knowledge.ui.components.repo_controls_widget import QKnowledgeRepoControlsWidget
 from lks_utils.knowledge.ui.widgets.graph_canvas import QKnowledgeGraphCanvasWidget
-from lks_utils.knowledge.ui.widgets.field_node_canvas_item import QKnowledgeFieldNodeCanvasItem
+from lks_utils.knowledge.ui.widgets.field_node_canvas_object import QKnowledgeFieldNodeCanvasObject
 from lks_utils.knowledge.ui.components.workbench import QKnowledgeWorkbenchWidget
 
 __all__ = [
@@ -39,6 +39,6 @@ __all__ = [
     "QKnowledgeRefAwareDeleteDialog",
     "QKnowledgeRefPickerDialog",
     "QKnowledgeRepoControlsWidget",
-    "QKnowledgeFieldNodeCanvasItem",
+    "QKnowledgeFieldNodeCanvasObject",
     "QKnowledgeWorkbenchWidget",
 ]

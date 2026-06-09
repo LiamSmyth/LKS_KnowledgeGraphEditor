@@ -47,13 +47,23 @@ def clear_repo_contents_impl(
     return repo_status(resolved, io)
 
 
+def open_repo_impl(path: str) -> dict[str, Any]:
+    """Return repository status plus lightweight graph-view summary."""
+    resolved = resolve_existing_repo(path)
+    io = _build_io(path)
+    status = repo_status(resolved, io)
+    views = CanvasIO.list_graph_views(io)
+    status["graph_view_count"] = len(views)
+    status["graph_view_names"] = [view.name for view in sorted(
+        views, key=lambda entry: entry.name.casefold())]
+    return status
+
+
 def register_repo_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     def open_repo(path: str) -> dict[str, Any]:
         """[READ-ONLY] Load an existing knowledge repo directory and return status."""
-        resolved = resolve_existing_repo(path)
-        io = _build_io(path)
-        return repo_status(resolved, io)
+        return open_repo_impl(path)
 
     @mcp.tool()
     def create_repo(path: str, source_repo_id: str = "default") -> dict[str, Any]:
@@ -90,8 +100,7 @@ def register_repo_tools(mcp: FastMCP) -> None:
                 "mode": mode,
                 "links": list_links_compact_impl(path, include_names=True),
             }
-
-            io = _build_io(path)
+        io = _build_io(path)
         return {
             "mode": mode,
             "nodes": [node_compact(node) for node in io.list_nodes()],

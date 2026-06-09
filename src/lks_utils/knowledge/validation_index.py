@@ -2,13 +2,21 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Literal
 
 from PySide6.QtCore import QObject, Signal
 
+from lks_utils.knowledge.integrity_delta import (
+    IntegrityDelta,
+    IntegrityFingerprint,
+    apply_integrity_delta_to_fingerprint,
+    build_integrity_fingerprint,
+    scrub_integrity_reasons,
+)
 from lks_utils.knowledge.instance_validator import InstanceValidator
 from lks_utils.knowledge.integrity_reporter import IntegrityReporter
+from lks_utils.knowledge.projection_issue import ProjectionIssue
 from lks_utils.knowledge.repository import Repository
 from lks_utils.knowledge.reverse_ref_index import ReverseRefIndex
 from lks_utils.knowledge.validation_status import ValidationStatus
@@ -18,7 +26,6 @@ from lks_utils.knowledge.validation_statuses.invalid_validation_status import (
 from lks_utils.knowledge.validation_statuses.valid_validation_status import (
     ValidValidationStatus,
 )
-
 
 class ValidationIndex(QObject):
     """Tracks validation status by object id and supports incremental recompute."""
@@ -37,14 +44,80 @@ class ValidationIndex(QObject):
         self._reverse_ref_index_getter = reverse_ref_index_getter
         self._status_by_object_id: dict[str, ValidationStatus] = {}
         self._valid_sentinel = ValidValidationStatus()
-        # Integrity cache: recompute only when links or link-types change.
-        self._cached_integrity_sig: tuple[frozenset[str],
-                                          frozenset[str]] | None = None
+        self._cached_integrity_sig: IntegrityFingerprint | None = None
         self._cached_integrity_reasons: dict[str, list[str]] = {}
+        self._projection_reasons_by_object_id: dict[str, list[str]] = {}
 
     def status_for(self, object_id: str) -> ValidationStatus:
         """Return validity status for ``object_id`` (valid sentinel by default)."""
-        return self._status_by_object_id.get(object_id, self._valid_sentinel)
+        base = self._status_by_object_id.get(object_id, self._valid_sentinel)
+        projection_reasons = self._projection_reasons_by_object_id.get(
+            object_id, ()
+        )
+        if not projection_reasons:
+            return base
+        merged_reasons = list(base.reasons) + list(projection_reasons)
+        if base.is_valid and not merged_reasons:
+            return self._valid_sentinel
+        if base.is_valid:
+            return InvalidValidationStatus(merged_reasons)
+        return InvalidValidationStatus(merged_reasons)
+
+    def iter_invalid(self) -> Iterator[str]:
+        """Yield object ids with materialized semantic, structural, or projection issues."""
+        seen: set[str] = set()
+        for object_id in self._status_by_object_id:
+            if not self.status_for(object_id).is_valid:
+                seen.add(object_id)
+                yield object_id
+        for object_id in self._projection_reasons_by_object_id:
+            if object_id in seen:
+                continue
+            if not self.status_for(object_id).is_valid:
+                yield object_id
+
+    def apply_projection_issues(self, issues: list[ProjectionIssue]) -> set[str]:
+        """Replace projection-layer findings and emit ``validation_changed``."""
+        new_reasons: dict[str, list[str]] = defaultdict(list)
+        for issue in issues:
+            new_reasons[issue.object_id].append(f"{issue.code}: {issue.detail}")
+
+        changed_ids: set[str] = set()
+        old_ids = set(self._projection_reasons_by_object_id) | set(new_reasons)
+        for object_id in old_ids:
+            previous = tuple(self._projection_reasons_by_object_id.get(object_id, ()))
+            current = tuple(new_reasons.get(object_id, ()))
+            if previous != current:
+                changed_ids.add(object_id)
+
+        self._projection_reasons_by_object_id = {
+            object_id: reasons
+            for object_id, reasons in new_reasons.items()
+            if reasons
+        }
+
+        if changed_ids:
+            self.validation_changed.emit(set(changed_ids))
+        return changed_ids
+
+    def apply_integrity_delta(self, delta: IntegrityDelta) -> None:
+        """Incrementally update the integrity sub-cache after structural delete."""
+        if not delta.removed_link_ids and not delta.removed_node_ids:
+            return
+        self._cached_integrity_reasons = scrub_integrity_reasons(
+            self._cached_integrity_reasons,
+            delta,
+        )
+        if self._cached_integrity_sig is not None:
+            self._cached_integrity_sig = apply_integrity_delta_to_fingerprint(
+                self._cached_integrity_sig,
+                delta,
+            )
+
+    def refresh_integrity_cache(self, repository: Repository) -> None:
+        """Rebuild the integrity sub-cache from a full report (load/repair only)."""
+        self._cached_integrity_sig = build_integrity_fingerprint(repository)
+        self._cached_integrity_reasons = self._integrity_reasons_by_object(repository)
 
     def recompute(
         self,
@@ -71,11 +144,7 @@ class ValidationIndex(QObject):
             impacted_ids |= {
                 object_id for object_id in touched_ids if object_id in all_ids}
 
-        # Reuse cached integrity results when the link/link-type structure is
-        # unchanged.  Integrity issues are purely structural (dangling links /
-        # link-types); they cannot change when only node *properties* are edited.
-        structural_sig = (frozenset(all_link_ids),
-                          frozenset(all_link_type_ids))
+        structural_sig = build_integrity_fingerprint(repository)
         if structural_sig != self._cached_integrity_sig:
             self._cached_integrity_reasons = self._integrity_reasons_by_object(
                 repository
@@ -183,4 +252,9 @@ class ValidationIndex(QObject):
             return None
 
 
-__all__ = ["ValidationIndex"]
+__all__ = [
+    "IntegrityFingerprint",
+    "IntegrityDelta",
+    "ValidationIndex",
+    "build_integrity_fingerprint",
+]

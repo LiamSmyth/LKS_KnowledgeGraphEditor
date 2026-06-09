@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from lks_utils.gui_qt.canvas2d.canvas2d_renderer import FrameTimings
+    from lks_utils.gui_qt.canvas2d.render.canvas_renderer import FrameTimings
 
 # If the unaccounted remainder exceeds this fraction of total frame time the
 # residual row is flagged as a warning by the builder (kind="residual_warn").

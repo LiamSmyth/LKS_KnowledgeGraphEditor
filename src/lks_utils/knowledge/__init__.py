@@ -31,7 +31,7 @@ from lks_utils.knowledge.models.node_slot import (
 )
 from lks_utils.knowledge.models.type import TypeView, as_type, is_type, make_type
 from lks_utils.knowledge.multi_repo_index import MultiRepoIndex
-from lks_utils.knowledge.ui.widgets.field_node_canvas_item import QKnowledgeFieldNodeCanvasItem
+from lks_utils.knowledge.ui.widgets.field_node_canvas_object import QKnowledgeFieldNodeCanvasObject
 from lks_utils.knowledge.ui.components.field_row_factory import FieldRowFactory
 from lks_utils.knowledge.ui.components.decomposition_canvas import QKnowledgeDecompositionCanvasWidget
 from lks_utils.knowledge.ui.components.library_panel import QKnowledgeLibraryPanel
@@ -67,7 +67,7 @@ __all__ = [
     "build_graph_layout",
     "is_type",
     "make_type",
-    "QKnowledgeFieldNodeCanvasItem",
+    "QKnowledgeFieldNodeCanvasObject",
     "QKnowledgeDecompositionCanvasWidget",
     "QKnowledgeLibraryPanel",
     "QKnowledgeRefPickerDialog",

@@ -32,6 +32,7 @@ from ai.mcp.knowledge.tools_batch import register_batch_tools
 from ai.mcp.knowledge.tools_canvas import register_canvas_tools
 from ai.mcp.knowledge.tools_destructive import register_destructive_tools
 from ai.mcp.knowledge.tools_graph import register_graph_tools
+from ai.mcp.knowledge.tools_help import register_help_tools
 from ai.mcp.knowledge.tools_integrity import register_integrity_tools
 from ai.mcp.knowledge.tools_links import register_link_tools
 from ai.mcp.knowledge.tools_nodes import register_node_tools
@@ -43,6 +44,7 @@ from ai.mcp.knowledge.tools_structural import register_structural_tools
 def create_server() -> FastMCP:
     """Create and configure the knowledge MCP server instance."""
     mcp = FastMCP("knowledge-repo")
+    register_help_tools(mcp)
     register_repo_tools(mcp)
     register_node_tools(mcp)
     register_link_tools(mcp)

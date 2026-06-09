@@ -1,15 +1,18 @@
-"""CanvasIO projection layer between KnowledgeIO events and canvas documents."""
+"""CanvasIO projection layer for view documents and graph-view mutations."""
 from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import time
 from collections import defaultdict, deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from ulid import ULID
 
+from lks_utils.events import append_journal_record
 from lks_utils.graph2d_layout.algorithms import (
     CircularNodeLayoutAlgorithm2D,
     ConstrainedForceDirectedNodeLayoutAlgorithm2D,
@@ -25,11 +28,14 @@ from lks_utils.knowledge.canvas.canvas_document import (
     load_canvas_document,
     save_canvas_document,
 )
-from lks_utils.knowledge.knowledge_change_event import KnowledgeChangeEvent
-from lks_utils.knowledge.knowledge_change_listener import KnowledgeChangeListener
+from lks_utils.knowledge.canvas.canvas_mutation_effects import CanvasMutationEffects
+from lks_utils.knowledge.links.link_instance import LinkInstance
 from lks_utils.knowledge.models.graph_view import GraphView
 from lks_utils.knowledge.models.graph_view_edge_proxy import GraphViewEdgeProxy
 from lks_utils.knowledge.models.graph_view_node_proxy import GraphViewNodeProxy
+
+
+_CANVAS_EVENT_STREAM = "knowledge_events"
 
 
 class _KnowledgeIOSubscriber(Protocol):
@@ -39,12 +45,21 @@ class _KnowledgeIOSubscriber(Protocol):
     def repository(self) -> Any:
         """Knowledge repository snapshot accessor."""
 
-    def subscribe(self, listener: KnowledgeChangeListener) -> None:
-        """Register one listener for knowledge change events."""
+    def find_node(self, node_id: str) -> Any:
+        """Return one node or None."""
+
+    def find_link(self, link_id: str) -> Any:
+        """Return one link or None."""
+
+    def get_node_hydrated(self, node_id: str) -> dict[str, object]:
+        """Return one node with hydrated inheritance payload."""
+
+    def get_effective_props(self, instance_id: str) -> dict[str, object]:
+        """Return effective props for one instance node."""
 
 
-class CanvasIO(KnowledgeChangeListener):
-    """Canvas projection service bound to one ``.kbview.json`` view file."""
+class CanvasIO:
+    """Canvas projection service bound to one view file."""
 
     def __init__(
         self,
@@ -53,7 +68,6 @@ class CanvasIO(KnowledgeChangeListener):
     ) -> None:
         self._view_path: Path = Path(view_path)
         self._knowledge_io: _KnowledgeIOSubscriber = knowledge_io
-        self._knowledge_io.subscribe(self)
 
     @property
     def view_path(self) -> Path:
@@ -116,60 +130,360 @@ class CanvasIO(KnowledgeChangeListener):
             "zoom": float(view_payload.get("zoom", 1.0)),
         }
 
-    def get_canvas_graph_state(self) -> dict[str, Any]:
+    def get_canvas_graph_state(self, *, mode: Literal["full", "compact"] = "full") -> dict[str, Any]:
         """Return normalized canvas graph state (nodes/edges/bounds)."""
         document = self._load_document()
         node_rows: list[dict[str, Any]] = []
         node_id_to_local: dict[str, str] = {}
-        for index, item in enumerate(document.items):
-            if item.get("type") != "knowledge.kb_node":
+        for index, obj in enumerate(document.objects):
+            if obj.get("type") != "knowledge.kb_node":
                 continue
-            node_id = str(item.get("node_id", ""))
+            node_id = str(obj.get("node_id", ""))
             if not node_id:
                 continue
-            node = self._knowledge_io.repository.find_node(node_id)
+            node = self._knowledge_io.find_node(node_id)
             node_name = node.name if node is not None else node_id
             local_id = f"kb_node_{index}"
             node_id_to_local[node_id] = local_id
-            node_rows.append(
-                {
-                    "local_id": local_id,
-                    "node_id": node_id,
-                    "name": node_name,
-                    "x": float(item.get("x", 0.0)),
-                    "y": float(item.get("y", 0.0)),
-                    "w": float(item.get("width", item.get("w", 240.0))),
-                    "h": float(item.get("height", item.get("h", 80.0))),
-                }
-            )
+            row: dict[str, Any] = {
+                "local_id": local_id,
+                "node_id": node_id,
+                "name": node_name,
+                "x": float(obj.get("x", 0.0)),
+                "y": float(obj.get("y", 0.0)),
+                "w": float(obj.get("width", obj.get("w", 240.0))),
+                "h": float(obj.get("height", obj.get("h", 80.0))),
+            }
+            if mode == "compact":
+                row["category"] = node.category if node is not None else None
+                row["type_id"] = str(
+                    node.type_id) if node is not None and node.type_id is not None else None
+            node_rows.append(row)
 
         edge_rows: list[dict[str, Any]] = []
-        for index, item in enumerate(document.items):
-            if item.get("type") != "knowledge.kb_edge":
+        for index, obj in enumerate(document.objects):
+            if obj.get("type") != "knowledge.kb_edge":
                 continue
-            from_node_id = str(item.get("from_node_id", ""))
-            to_node_id = str(item.get("to_node_id", ""))
+            from_node_id = str(obj.get("from_node_id", ""))
+            to_node_id = str(obj.get("to_node_id", ""))
             if not from_node_id or not to_node_id:
                 continue
-            edge_rows.append(
-                {
-                    "local_id": f"kb_edge_{index}",
-                    "link_id": str(item.get("link_id", "")) or None,
-                    "source_local_id": node_id_to_local.get(from_node_id),
-                    "target_local_id": node_id_to_local.get(to_node_id),
-                    "source_node_id": from_node_id,
-                    "target_node_id": to_node_id,
-                }
-            )
+            edge_row: dict[str, Any] = {
+                "local_id": f"kb_edge_{index}",
+                "link_id": str(obj.get("link_id", "")) or None,
+                "source_local_id": node_id_to_local.get(from_node_id),
+                "target_local_id": node_id_to_local.get(to_node_id),
+                "source_node_id": from_node_id,
+                "target_node_id": to_node_id,
+            }
+            if mode == "compact":
+                link_id = edge_row.get("link_id")
+                if isinstance(link_id, str) and link_id:
+                    link = self._knowledge_io.find_link(link_id)
+                    edge_row["link_type_id"] = (
+                        str(link.link_type_id) if link is not None else None
+                    )
+                else:
+                    edge_row["link_type_id"] = None
+            edge_rows.append(edge_row)
 
         bbox = self._compute_bbox(node_rows)
         return {
             "view_format": "kb_canvas",
             "view_path": str(self._view_path),
+            "mode": mode,
             "nodes": node_rows,
             "edges": edge_rows,
             "bbox": bbox,
         }
+
+    def get_canvas_graph_slice(
+        self,
+        *,
+        node_ids: list[str] | None = None,
+        name_query: str | None = None,
+        max_hops: int = 1,
+        include_props: bool = False,
+        include_link_types: bool = True,
+    ) -> dict[str, Any]:
+        """Return a focused subgraph slice from the current canvas view."""
+        state = self.get_canvas_graph_state(mode="compact")
+        nodes = list(state["nodes"])
+        edges = list(state["edges"])
+        node_by_id = {str(node["node_id"]): node for node in nodes}
+
+        start_ids: set[str] = set()
+        if node_ids:
+            for node_id in node_ids:
+                key = str(node_id)
+                if key in node_by_id:
+                    start_ids.add(key)
+        if name_query:
+            token = str(name_query).casefold().strip()
+            if token:
+                for node in nodes:
+                    if token in str(node.get("name", "")).casefold():
+                        start_ids.add(str(node["node_id"]))
+        if not start_ids:
+            raise ValueError(
+                "Provide node_ids or name_query that matches at least one placed node")
+
+        adjacency: dict[str, set[str]] = defaultdict(set)
+        for edge in edges:
+            source = str(edge.get("source_node_id", ""))
+            target = str(edge.get("target_node_id", ""))
+            if not source or not target:
+                continue
+            adjacency[source].add(target)
+            adjacency[target].add(source)
+
+        hop_limit = max(0, int(max_hops))
+        visited: set[str] = set(start_ids)
+        frontier: deque[tuple[str, int]] = deque(
+            (node_id, 0) for node_id in sorted(start_ids))
+        while frontier:
+            current, depth = frontier.popleft()
+            if depth >= hop_limit:
+                continue
+            for neighbor in adjacency.get(current, set()):
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                frontier.append((neighbor, depth + 1))
+
+        sliced_nodes = [node_by_id[node_id]
+                        for node_id in visited if node_id in node_by_id]
+        sliced_edges = [
+            edge
+            for edge in edges
+            if str(edge.get("source_node_id", "")) in visited
+            and str(edge.get("target_node_id", "")) in visited
+        ]
+        if not include_link_types:
+            for edge in sliced_edges:
+                edge.pop("link_type_id", None)
+
+        if include_props:
+            for node in sliced_nodes:
+                hydrated = self._knowledge_io.get_node_hydrated(
+                    str(node["node_id"]))
+                node["hydrated"] = hydrated
+
+        return {
+            "view_format": "kb_canvas",
+            "view_path": str(self._view_path),
+            "max_hops": hop_limit,
+            "start_node_ids": sorted(start_ids),
+            "node_count": len(sliced_nodes),
+            "edge_count": len(sliced_edges),
+            "nodes": sorted(sliced_nodes, key=lambda row: str(row["node_id"])),
+            "edges": sorted(sliced_edges, key=lambda row: str(row.get("local_id", ""))),
+        }
+
+    def get_view_nodes_hydrated(
+        self,
+        *,
+        node_ids: list[str] | None = None,
+        include_effective_props: bool = True,
+    ) -> dict[str, Any]:
+        """Return hydrated payloads for selected/all nodes placed in this canvas."""
+        state = self.get_canvas_graph_state(mode="compact")
+        placed_ids = {str(row["node_id"]) for row in state["nodes"]}
+        selected_ids = (
+            {str(node_id)
+             for node_id in node_ids if str(node_id) in placed_ids}
+            if node_ids is not None
+            else placed_ids
+        )
+        rows: list[dict[str, Any]] = []
+        for node_id in sorted(selected_ids):
+            hydrated = self._knowledge_io.get_node_hydrated(node_id)
+            row: dict[str, Any] = {
+                "node_id": node_id,
+                "hydrated": hydrated,
+            }
+            if include_effective_props:
+                row["effective_props"] = self._knowledge_io.get_effective_props(
+                    node_id)
+            rows.append(row)
+        return {
+            "view_format": "kb_canvas",
+            "view_path": str(self._view_path),
+            "requested_node_ids": sorted(str(node_id) for node_id in node_ids) if node_ids is not None else None,
+            "resolved_node_ids": [row["node_id"] for row in rows],
+            "count": len(rows),
+            "nodes": rows,
+        }
+
+    def get_view_context(
+        self,
+        *,
+        include_in_viewport: bool = True,
+        default_viewport_width: float = 1200.0,
+        default_viewport_height: float = 800.0,
+    ) -> dict[str, Any]:
+        """Return token-efficient canvas context: viewport, counts, in-view nodes."""
+        viewport = self.read_viewport_sidecar()
+        if viewport is None:
+            fallback = self.read_view_fallback()
+            viewport = {
+                "center_x": fallback["center_x"],
+                "center_y": fallback["center_y"],
+                "zoom": fallback["zoom"],
+                "visible_node_ids": [],
+                "selected_node_ids": [],
+            }
+
+        compact_state = self.get_canvas_graph_state(mode="compact")
+        node_rows = list(compact_state["nodes"])
+        edge_rows = list(compact_state["edges"])
+        selected_ids = {
+            str(node_id)
+            for node_id in viewport.get("selected_node_ids", [])
+            if str(node_id)
+        }
+
+        in_viewport_nodes: list[dict[str, Any]] = []
+        if include_in_viewport:
+            world_region = viewport.get("viewport_world_region")
+            if isinstance(world_region, dict):
+                query_x = float(world_region.get("min_x", 0.0))
+                query_y = float(world_region.get("min_y", 0.0))
+                query_w = float(world_region.get("max_x", query_x)) - query_x
+                query_h = float(world_region.get("max_y", query_y)) - query_y
+            else:
+                zoom = max(float(viewport.get("zoom", 1.0)), 0.05)
+                half_w = float(default_viewport_width) / (2.0 * zoom)
+                half_h = float(default_viewport_height) / (2.0 * zoom)
+                center_x = float(viewport.get("center_x", 0.0))
+                center_y = float(viewport.get("center_y", 0.0))
+                query_x = center_x - half_w
+                query_y = center_y - half_h
+                query_w = half_w * 2.0
+                query_h = half_h * 2.0
+
+            for row in node_rows:
+                item_x = float(row.get("x", 0.0))
+                item_y = float(row.get("y", 0.0))
+                item_w = float(row.get("w", 240.0))
+                item_h = float(row.get("h", 80.0))
+                if not self._rects_overlap(
+                    query_x,
+                    query_y,
+                    query_w,
+                    query_h,
+                    item_x,
+                    item_y,
+                    item_w,
+                    item_h,
+                ):
+                    continue
+                in_viewport_nodes.append(
+                    {
+                        "node_id": str(row["node_id"]),
+                        "name": row.get("name"),
+                        "category": row.get("category"),
+                        "type_id": row.get("type_id"),
+                        "x": item_x,
+                        "y": item_y,
+                        "w": item_w,
+                        "h": item_h,
+                        "selected": str(row["node_id"]) in selected_ids,
+                    }
+                )
+
+        graph_view_id: str | None = None
+        graph_view_name: str | None = None
+        for view in self.list_graph_views(self._knowledge_io):
+            rel_path = self.graph_view_relpath(self._knowledge_io, str(view.id))
+            if rel_path is not None and rel_path.resolve() == self._view_path.resolve():
+                graph_view_id = str(view.id)
+                graph_view_name = view.name
+                break
+
+        return {
+            "view_format": "kb_canvas",
+            "view_path": str(self._view_path),
+            "graph_view_id": graph_view_id,
+            "graph_view_name": graph_view_name,
+            "viewport": {
+                "center_x": float(viewport.get("center_x", 0.0)),
+                "center_y": float(viewport.get("center_y", 0.0)),
+                "zoom": float(viewport.get("zoom", 1.0)),
+                "selected_node_ids": sorted(selected_ids),
+                "visible_node_ids": [
+                    str(node_id)
+                    for node_id in viewport.get("visible_node_ids", [])
+                    if str(node_id)
+                ],
+            },
+            "placed_node_count": len(node_rows),
+            "placed_edge_count": len(edge_rows),
+            "in_viewport_node_count": len(in_viewport_nodes),
+            "in_viewport_nodes": sorted(
+                in_viewport_nodes,
+                key=lambda row: str(row.get("name", row["node_id"])).casefold(),
+            ),
+        }
+
+    def place_kb_edge(
+        self,
+        *,
+        link_id: str,
+        from_node_id: str,
+        to_node_id: str,
+    ) -> CanvasMutationEffects:
+        """Place one kb_edge when the KB link already exists."""
+        link = self._knowledge_io.find_link(link_id)
+        if link is None:
+            raise KeyError(f"Link not found: {link_id}")
+
+        def _mutate(document: CanvasDocument) -> CanvasDocument | None:
+            for obj in document.objects:
+                if (
+                    obj.get("type") == "knowledge.kb_edge"
+                    and obj.get("link_id") == link_id
+                ):
+                    return None
+            objects = list(document.objects)
+            objects.append(
+                {
+                    "type": "knowledge.kb_edge",
+                    "link_id": link_id,
+                    "from_node_id": str(from_node_id),
+                    "to_node_id": str(to_node_id),
+                }
+            )
+            return CanvasDocument(
+                version=document.version,
+                objects=objects,
+                metadata=document.metadata,
+                overlays=document.overlays,
+                bookmarks=document.bookmarks,
+            )
+
+        return self.mutate_view(
+            _mutate,
+            entity_id=link_id,
+            event_type="canvas_document_patched",
+        )
+
+    @staticmethod
+    def _rects_overlap(
+        ax: float,
+        ay: float,
+        aw: float,
+        ah: float,
+        bx: float,
+        by: float,
+        bw: float,
+        bh: float,
+    ) -> bool:
+        ax2 = ax + aw
+        ay2 = ay + ah
+        bx2 = bx + bw
+        by2 = by + bh
+        return ax < bx2 and ax2 > bx and ay < by2 and ay2 > by
 
     def export_canvas_png(
         self,
@@ -391,23 +705,123 @@ class CanvasIO(KnowledgeChangeListener):
             "render_mode": "viewport_region",
         }
 
-    def on_knowledge_change(self, event: KnowledgeChangeEvent) -> None:
-        """Project incoming knowledge mutation events onto the canvas document."""
-        if event.event_type == "node_upserted":
-            self._handle_node_upserted(event.entity_id)
-            return None
-        if event.event_type in {"node_deleted", "node_removed"}:
-            self._handle_node_removed(event.entity_id)
-            return None
-        if event.event_type == "link_upserted":
-            self._handle_link_upserted(event.entity_id)
-            return None
-        if event.event_type in {"link_deleted", "link_removed"}:
-            self._handle_link_removed(event.entity_id)
-            return None
-        if event.event_type == "link_type_upserted":
-            self._handle_link_type_upserted(event.entity_id)
-        return None
+    def mutate_view(
+        self,
+        mutator_fn: Callable[[CanvasDocument], CanvasDocument | None],
+        *,
+        entity_id: str = "",
+        event_type: str = "canvas_document_patched",
+    ) -> CanvasMutationEffects:
+        """Apply one atomic canvas-document mutation with journal append."""
+        document = self._load_document()
+        updated = mutator_fn(document)
+        if updated is None:
+            return CanvasMutationEffects(
+                persisted=False,
+                event_type=event_type,
+                entity_id=entity_id,
+                touched_object_ids=frozenset(),
+                journal_record=None,
+            )
+        self._save_document(updated)
+        touched = self._diff_canvas_object_ids(document, updated)
+        journal_record = self._append_canvas_journal(
+            event_type=event_type,
+            entity_id=entity_id or str(self._view_path),
+        )
+        return CanvasMutationEffects(
+            persisted=True,
+            event_type=event_type,
+            entity_id=entity_id or str(self._view_path),
+            touched_object_ids=touched,
+            journal_record=journal_record,
+        )
+
+    def place_kb_node(
+        self,
+        *,
+        node_id: str,
+        x: float,
+        y: float,
+        width: float = 240.0,
+        height: float = 80.0,
+    ) -> CanvasMutationEffects:
+        """Composite facade: place one kb_node when the KB node already exists."""
+        self._knowledge_io.find_node(node_id)
+
+        def _mutate(document: CanvasDocument) -> CanvasDocument:
+            objects = list(document.objects)
+            objects.append(
+                {
+                    "type": "knowledge.kb_node",
+                    "node_id": node_id,
+                    "x": float(x),
+                    "y": float(y),
+                    "width": float(width),
+                    "height": float(height),
+                }
+            )
+            return CanvasDocument(
+                version=document.version,
+                objects=objects,
+                metadata=document.metadata,
+                overlays=document.overlays,
+                bookmarks=document.bookmarks,
+            )
+
+        return self.mutate_view(
+            _mutate,
+            entity_id=node_id,
+            event_type="canvas_document_patched",
+        )
+
+    def add_link_to_canvas(
+        self,
+        *,
+        link: LinkInstance,
+    ) -> tuple[Any, CanvasMutationEffects]:
+        """Composite facade: ensure KB link exists, then place kb_edge on canvas."""
+        upsert_link = getattr(self._knowledge_io, "upsert_link", None)
+        if not callable(upsert_link):
+            raise TypeError("knowledge_io must expose upsert_link for composite placement")
+        kb_result = upsert_link(link)
+
+        def _mutate(document: CanvasDocument) -> CanvasDocument:
+            objects = list(document.objects)
+            for obj in objects:
+                if (
+                    obj.get("type") == "knowledge.kb_edge"
+                    and obj.get("link_id") == link.id
+                ):
+                    return CanvasDocument(
+                        version=document.version,
+                        objects=objects,
+                        metadata=document.metadata,
+                        overlays=document.overlays,
+                        bookmarks=document.bookmarks,
+                    )
+            objects.append(
+                {
+                    "type": "knowledge.kb_edge",
+                    "link_id": link.id,
+                    "from_node_id": str(link.source_node_id),
+                    "to_node_id": str(link.target_node_id),
+                }
+            )
+            return CanvasDocument(
+                version=document.version,
+                objects=objects,
+                metadata=document.metadata,
+                overlays=document.overlays,
+                bookmarks=document.bookmarks,
+            )
+
+        canvas_effects = self.mutate_view(
+            _mutate,
+            entity_id=link.id,
+            event_type="canvas_document_patched",
+        )
+        return kb_result, canvas_effects
 
     def update_viewport_sidecar(
         self,
@@ -539,12 +953,12 @@ class CanvasIO(KnowledgeChangeListener):
         return (float(node_row.get("w", 240.0)), float(node_row.get("h", 80.0)))
 
     def clear_view(self, *, clear_sidecar: bool = True) -> None:
-        """Clear all canvas items for the bound view and optionally remove viewport sidecar."""
+        """Clear all canvas objects for the bound view and optionally remove viewport sidecar."""
         document = self._load_document()
         self._save_document(
             CanvasDocument(
                 version=document.version,
-                items=[],
+                objects=[],
                 metadata=document.metadata,
                 overlays=document.overlays,
                 bookmarks=document.bookmarks,
@@ -603,6 +1017,93 @@ class CanvasIO(KnowledgeChangeListener):
         if root is None:
             return None
         return (Path(root) / rel).resolve()
+
+    @staticmethod
+    def resolve_graph_view_path(
+        knowledge_io: _KnowledgeIOSubscriber,
+        repo_root: Path,
+        canvas_ref: str,
+    ) -> Path:
+        """Resolve a canvas path, graph-view id, or display name to an on-disk view file."""
+        token = str(canvas_ref).strip()
+        if not token:
+            raise ValueError("canvas_ref must be a non-empty path, id, or name")
+
+        candidate = Path(token)
+        if candidate.is_absolute():
+            return candidate.resolve()
+
+        resolved_root = repo_root.resolve()
+        path_candidate = (resolved_root / candidate).resolve()
+        if path_candidate.exists():
+            return path_candidate
+
+        lowered = token.casefold()
+        for view in CanvasIO.list_graph_views(knowledge_io):
+            view_id = str(view.id)
+            if view_id == token or view_id.casefold() == lowered:
+                resolved = CanvasIO.graph_view_relpath(knowledge_io, view_id)
+                if resolved is not None:
+                    return resolved
+            if str(view.name).casefold() == lowered:
+                resolved = CanvasIO.graph_view_relpath(knowledge_io, view_id)
+                if resolved is not None:
+                    return resolved
+
+        raise ValueError(
+            f"Could not resolve canvas_ref {canvas_ref!r} under repository {repo_root}"
+        )
+
+    @staticmethod
+    def apply_projection_hygiene_for_effects(
+        knowledge_io: _KnowledgeIOSubscriber,
+        effects: Any,
+        *,
+        affected_view_ids: frozenset[str] | None = None,
+    ) -> list[str]:
+        """Run scoped projection hygiene after a KB mutate (MCP/UI parity with workbench)."""
+        from lks_utils.knowledge.io.mutation_effects import MutationEffects
+        from lks_utils.knowledge.io.mutation_policy import (
+            CanvasHygieneHint,
+            resolve_policy,
+        )
+        from lks_utils.knowledge.projection_hygiene import ProjectionHygiene
+
+        if not isinstance(effects, MutationEffects):
+            return []
+        if effects.journal_record is None:
+            return []
+
+        policy = resolve_policy(effects.mutation_kind, effects.structural_change)
+        hint = policy.canvas_hygiene_hint
+        if hint is CanvasHygieneHint.NONE:
+            return []
+
+        repo_root = getattr(knowledge_io, "repository_root", None)
+        if repo_root is None:
+            repo_root = getattr(knowledge_io.repository, "_repo_root", None)
+        if repo_root is None:
+            return []
+
+        updated_view_ids: list[str] = []
+        hygiene = ProjectionHygiene()
+        for graph_view in list(knowledge_io.repository.list_graph_views()):
+            view_id = str(graph_view.id)
+            if (
+                affected_view_ids is not None
+                and view_id not in affected_view_ids
+            ):
+                continue
+            updated = hygiene.apply_to_graph_view(
+                graph_view,
+                hint=hint,
+                event=effects.journal_record,
+                knowledge_io=knowledge_io,
+            )
+            if updated is not None:
+                CanvasIO.save_graph_view(knowledge_io, updated)
+                updated_view_ids.append(view_id)
+        return updated_view_ids
 
     @staticmethod
     def load_graph_view_from_repo_root(repo_root: Path, graph_view_id: str) -> GraphView:
@@ -1369,41 +1870,45 @@ class CanvasIO(KnowledgeChangeListener):
         self,
         graph_view_id: str,
         positions_by_local_id: dict[str, tuple[float, float]],
-    ) -> GraphView:
-        """Patch only node proxy x/y for one graph view and persist it.
-
-        This is a composition-safe write surface for drag-release commits:
-        only provided local ids have position updates applied.
-        """
+    ) -> tuple[GraphView, CanvasMutationEffects]:
+        """Patch only node proxy x/y for one graph view and persist with journal."""
         graph_view = self._knowledge_io.repository.load_graph_view(
             graph_view_id)
         if not positions_by_local_id:
-            return graph_view
-
-        updated_nodes = dict(graph_view.nodes)
-        changed = False
-        for local_id, coords in positions_by_local_id.items():
-            if local_id not in updated_nodes:
-                continue
-            proxy = updated_nodes[local_id]
-            new_x = float(coords[0])
-            new_y = float(coords[1])
-            if proxy.x == new_x and proxy.y == new_y:
-                continue
-            updated_nodes[local_id] = GraphViewNodeProxy(
-                global_id=proxy.global_id,
-                x=new_x,
-                y=new_y,
-                cached_name=proxy.cached_name,
+            return graph_view, CanvasMutationEffects(
+                persisted=False,
+                event_type="graph_view_patched",
+                entity_id=graph_view_id,
+                touched_object_ids=frozenset(),
+                journal_record=None,
             )
-            changed = True
 
-        if not changed:
-            return graph_view
+        updated_view = self.apply_graph_view_local_position_updates(
+            graph_view=graph_view,
+            positions_by_local_id=positions_by_local_id,
+        )
+        if updated_view is graph_view:
+            return graph_view, CanvasMutationEffects(
+                persisted=False,
+                event_type="graph_view_patched",
+                entity_id=graph_view_id,
+                touched_object_ids=frozenset(),
+                journal_record=None,
+            )
 
-        updated_view = dataclasses.replace(graph_view, nodes=updated_nodes)
         self._knowledge_io.repository.save_graph_view(updated_view)
-        return updated_view
+        touched = frozenset(positions_by_local_id.keys())
+        journal_record = self._append_canvas_journal(
+            event_type="graph_view_patched",
+            entity_id=graph_view_id,
+        )
+        return updated_view, CanvasMutationEffects(
+            persisted=True,
+            event_type="graph_view_patched",
+            entity_id=graph_view_id,
+            touched_object_ids=touched,
+            journal_record=journal_record,
+        )
 
     def layout_canvas_nodes(
         self,
@@ -1425,13 +1930,13 @@ class CanvasIO(KnowledgeChangeListener):
         document = self._load_document()
         selected_node_ids = {str(node_id) for node_id in node_ids or []}
         indexed_nodes: list[tuple[int, dict[str, Any]]] = []
-        for idx, item in enumerate(document.items):
-            if item.get("type") != "knowledge.kb_node":
+        for idx, obj in enumerate(document.objects):
+            if obj.get("type") != "knowledge.kb_node":
                 continue
-            node_id = str(item.get("node_id", ""))
+            node_id = str(obj.get("node_id", ""))
             if selected_node_ids and node_id not in selected_node_ids:
                 continue
-            indexed_nodes.append((idx, dict(item)))
+            indexed_nodes.append((idx, dict(obj)))
         if not indexed_nodes:
             return {
                 "layout_applied": False,
@@ -1459,12 +1964,12 @@ class CanvasIO(KnowledgeChangeListener):
                 )
             )
 
-        min_x = min(float(item.get("x", 0.0)) for _, item in indexed_nodes)
-        min_y = min(float(item.get("y", 0.0)) for _, item in indexed_nodes)
-        max_x = max(float(item.get("x", 0.0)) + float(item.get("width",
-                    item.get("w", 240.0))) for _, item in indexed_nodes)
-        max_y = max(float(item.get("y", 0.0)) + float(item.get("height",
-                    item.get("h", 80.0))) for _, item in indexed_nodes)
+        min_x = min(float(obj.get("x", 0.0)) for _, item in indexed_nodes)
+        min_y = min(float(obj.get("y", 0.0)) for _, item in indexed_nodes)
+        max_x = max(float(obj.get("x", 0.0)) + float(obj.get("width",
+                    obj.get("w", 240.0))) for _, item in indexed_nodes)
+        max_y = max(float(obj.get("y", 0.0)) + float(obj.get("height",
+                    obj.get("h", 80.0))) for _, item in indexed_nodes)
         center_x = float(anchor_x) if anchor_x is not None else (
             min_x + (max_x - min_x) * 0.5)
         center_y = float(anchor_y) if anchor_y is not None else (
@@ -1513,20 +2018,20 @@ class CanvasIO(KnowledgeChangeListener):
             )
 
         positions = algorithm_impl.compute(nodes_for_layout, [])
-        updated_items = list(document.items)
+        updated_objects = list(document.objects)
         for idx, payload in indexed_nodes:
             node_id = str(payload.get("node_id", ""))
             item = dict(payload)
             x, y = positions.get(
-                node_id, (float(item.get("x", 0.0)), float(item.get("y", 0.0))))
+                node_id, (float(obj.get("x", 0.0)), float(obj.get("y", 0.0))))
             item["x"] = float(x)
             item["y"] = float(y)
-            updated_items[idx] = item
+            updated_objects[idx] = item
 
         self._save_document(
             CanvasDocument(
                 version=document.version,
-                items=updated_items,
+                objects=updated_objects,
                 metadata=document.metadata,
                 overlays=document.overlays,
                 bookmarks=document.bookmarks,
@@ -1550,7 +2055,7 @@ class CanvasIO(KnowledgeChangeListener):
         gap: float,
         layout_mode: str = "rect",
     ) -> dict[str, Any]:
-        """Place selected kb_node items into a deterministic lane."""
+        """Place selected kb_node objects into a deterministic lane."""
         key = orientation.strip().lower()
         wanted = {str(node_id) for node_id in node_ids}
         if not wanted:
@@ -1558,8 +2063,8 @@ class CanvasIO(KnowledgeChangeListener):
 
         document = self._load_document()
         indexed: list[tuple[int, dict[str, Any]]] = []
-        for idx, item in enumerate(document.items):
-            payload = dict(item)
+        for idx, obj in enumerate(document.objects):
+            payload = dict(obj)
             if payload.get("type") != "knowledge.kb_node":
                 continue
             node_id = str(payload.get("node_id", ""))
@@ -1602,13 +2107,13 @@ class CanvasIO(KnowledgeChangeListener):
         )
         positions = algorithm.compute(nodes, [])
 
-        updated = list(document.items)
+        updated = list(document.objects)
         changed = 0
         for idx, payload in indexed:
             item = dict(payload)
             node_id = str(payload.get("node_id", ""))
             x, y = positions.get(
-                node_id, (float(item.get("x", 0.0)), float(item.get("y", 0.0))))
+                node_id, (float(obj.get("x", 0.0)), float(obj.get("y", 0.0))))
             item["x"] = float(x)
             item["y"] = float(y)
             updated[idx] = item
@@ -1617,7 +2122,7 @@ class CanvasIO(KnowledgeChangeListener):
         self._save_document(
             CanvasDocument(
                 version=document.version,
-                items=updated,
+                objects=updated,
                 metadata=document.metadata,
                 overlays=document.overlays,
                 bookmarks=document.bookmarks,
@@ -1733,11 +2238,11 @@ class CanvasIO(KnowledgeChangeListener):
         positions = algorithm.compute(layout_nodes, filtered_edges)
 
         root_pos = positions.get(root_node_id, (0.0, 0.0))
-        root_item = placed[root_node_id][1]
-        root_w = float(root_item.get("width", root_item.get("w", 240.0)))
-        root_h = float(root_item.get("height", root_item.get("h", 80.0)))
-        root_left = float(root_item.get("x", 0.0))
-        root_top = float(root_item.get("y", 0.0))
+        root_object = placed[root_node_id][1]
+        root_w = float(root_object.get("width", root_object.get("w", 240.0)))
+        root_h = float(root_object.get("height", root_object.get("h", 80.0)))
+        root_left = float(root_object.get("x", 0.0))
+        root_top = float(root_object.get("y", 0.0))
         root_center = (root_left + root_w / 2.0, root_top + root_h / 2.0)
 
         root_layout_w = 0.0
@@ -1752,7 +2257,7 @@ class CanvasIO(KnowledgeChangeListener):
             float(root_pos[1]) + root_layout_h / 2.0,
         )
 
-        updated = list(document.items)
+        updated = list(document.objects)
         changed = 0
         for node_id in tree_nodes:
             idx, payload = placed[node_id]
@@ -1781,7 +2286,7 @@ class CanvasIO(KnowledgeChangeListener):
         self._save_document(
             CanvasDocument(
                 version=document.version,
-                items=updated,
+                objects=updated,
                 metadata=document.metadata,
                 overlays=document.overlays,
                 bookmarks=document.bookmarks,
@@ -1803,7 +2308,7 @@ class CanvasIO(KnowledgeChangeListener):
         padding: float = 24.0,
         max_iterations: int = 80,
     ) -> dict[str, Any]:
-        """Push overlapping kb_node items apart until overlaps settle."""
+        """Push overlapping kb_node objects apart until overlaps settle."""
         document = self._load_document()
         indexed = self._indexed_kb_nodes(document)
         selected = {str(node_id) for node_id in node_ids or []}
@@ -1850,7 +2355,7 @@ class CanvasIO(KnowledgeChangeListener):
         if not moved:
             return {"iterations": iterations, "moved_nodes": 0}
 
-        updated = list(document.items)
+        updated = list(document.objects)
         for node_id in moved:
             idx, payload = indexed[node_id]
             item = dict(payload)
@@ -1863,7 +2368,7 @@ class CanvasIO(KnowledgeChangeListener):
         self._save_document(
             CanvasDocument(
                 version=document.version,
-                items=updated,
+                objects=updated,
                 metadata=document.metadata,
                 overlays=document.overlays,
                 bookmarks=document.bookmarks,
@@ -1920,11 +2425,11 @@ class CanvasIO(KnowledgeChangeListener):
 
         layout_edges: list[LayoutEdge2D] = []
         edge_count = 0
-        for item in document.items:
-            if item.get("type") != "knowledge.kb_edge":
+        for obj in document.objects:
+            if obj.get("type") != "knowledge.kb_edge":
                 continue
             if allowed_link_type_ids:
-                link_id = str(item.get("link_id", ""))
+                link_id = str(obj.get("link_id", ""))
                 if not link_id:
                     continue
                 link = self._knowledge_io.repository.find_link(link_id)
@@ -1932,8 +2437,8 @@ class CanvasIO(KnowledgeChangeListener):
                     continue
                 if str(link.link_type_id) not in allowed_link_type_ids:
                     continue
-            src = str(item.get("from_node_id", ""))
-            dst = str(item.get("to_node_id", ""))
+            src = str(obj.get("from_node_id", ""))
+            dst = str(obj.get("to_node_id", ""))
             if src not in indexed or dst not in indexed:
                 continue
             layout_edges.append(
@@ -1954,12 +2459,12 @@ class CanvasIO(KnowledgeChangeListener):
         )
         computed_positions = algorithm.compute(layout_nodes, layout_edges)
 
-        updated = list(document.items)
+        updated = list(document.objects)
         for node_id in movable:
             idx, payload = indexed[node_id]
             item = dict(payload)
             x, y = computed_positions.get(
-                node_id, (float(item.get("x", 0.0)), float(item.get("y", 0.0))))
+                node_id, (float(obj.get("x", 0.0)), float(obj.get("y", 0.0))))
             item["x"] = float(x)
             item["y"] = float(y)
             updated[idx] = item
@@ -1967,7 +2472,7 @@ class CanvasIO(KnowledgeChangeListener):
         self._save_document(
             CanvasDocument(
                 version=document.version,
-                items=updated,
+                objects=updated,
                 metadata=document.metadata,
                 overlays=document.overlays,
                 bookmarks=document.bookmarks,
@@ -1985,143 +2490,74 @@ class CanvasIO(KnowledgeChangeListener):
     def _load_document(self) -> CanvasDocument:
         return load_canvas_document(self._view_path)
 
+    def _sync_knowledge_index(self) -> None:
+        """Refresh index sidecar after canvas document writes when possible."""
+        sync_index_fn = getattr(self._knowledge_io, "sync_index", None)
+        if callable(sync_index_fn):
+            result = sync_index_fn()
+            if getattr(result, "status", "ok") == "error":
+                message = getattr(result, "error_message", "index sync failed")
+                raise RuntimeError(str(message))
+            return
+
+        repo = getattr(self._knowledge_io, "repository", None)
+        if repo is None:
+            return
+        repo_sync = getattr(repo, "_sync_index", None)
+        if callable(repo_sync):
+            repo_sync()
+
     def _save_document(self, document: CanvasDocument) -> None:
         save_canvas_document(document, self._view_path)
+        self._sync_knowledge_index()
 
-    def _handle_node_upserted(self, node_id: str) -> None:
-        document = self._load_document()
-        updated_items: list[dict[str, Any]] = []
-        touched = False
-        for item in document.items:
-            payload = dict(item)
-            if payload.get("type") == "knowledge.kb_node" and payload.get("node_id") == node_id:
-                touched = True
-            updated_items.append(payload)
+    def _repository_root(self) -> Path | None:
+        root = getattr(self._knowledge_io, "repository_root", None)
+        if root is not None:
+            return Path(root)
+        repo = getattr(self._knowledge_io, "repository", None)
+        inferred = getattr(repo, "_repo_root", None)
+        return Path(inferred) if inferred is not None else None
 
-        if touched:
-            self._save_document(
-                CanvasDocument(
-                    version=document.version,
-                    items=updated_items,
-                    metadata=document.metadata,
-                    overlays=document.overlays,
-                    bookmarks=document.bookmarks,
-                )
-            )
-
-    def _handle_node_removed(self, node_id: str) -> None:
-        document = self._load_document()
-        filtered_items: list[dict[str, Any]] = []
-        touched = False
-        for item in document.items:
-            payload = dict(item)
-            item_type = payload.get("type")
-            if item_type == "knowledge.kb_node" and payload.get("node_id") == node_id:
-                touched = True
-                continue
-            if item_type == "knowledge.kb_edge":
-                if payload.get("from_node_id") == node_id or payload.get("to_node_id") == node_id:
-                    touched = True
-                    continue
-            filtered_items.append(payload)
-
-        if touched:
-            self._save_document(
-                CanvasDocument(
-                    version=document.version,
-                    items=filtered_items,
-                    metadata=document.metadata,
-                    overlays=document.overlays,
-                    bookmarks=document.bookmarks,
-                )
-            )
-
-    def _handle_link_upserted(self, link_id: str) -> None:
-        link = self._knowledge_io.repository.find_link(link_id)
-        if link is None:
+    def _append_canvas_journal(
+        self,
+        *,
+        event_type: str,
+        entity_id: str,
+    ) -> dict[str, Any] | None:
+        repo_root = self._repository_root()
+        if repo_root is None:
             return None
-
-        document = self._load_document()
-        updated_items: list[dict[str, Any]] = []
-        touched = False
-        for item in document.items:
-            payload = dict(item)
-            if payload.get("type") == "knowledge.kb_edge" and payload.get("link_id") == link_id:
-                style = dict(payload.get("style", {}))
-                payload = {
-                    "type": "knowledge.kb_edge",
-                    "link_id": link_id,
-                    "from_node_id": str(link.source_node_id),
-                    "to_node_id": str(link.target_node_id),
-                }
-                if style:
-                    payload["style"] = style
-                touched = True
-            updated_items.append(payload)
-
-        if not touched:
-            updated_items.append(
-                {
-                    "type": "knowledge.kb_edge",
-                    "link_id": link_id,
-                    "from_node_id": str(link.source_node_id),
-                    "to_node_id": str(link.target_node_id),
-                }
-            )
-
-        self._save_document(
-            CanvasDocument(
-                version=document.version,
-                items=updated_items,
-                metadata=document.metadata,
-                overlays=document.overlays,
-                bookmarks=document.bookmarks,
-            )
-        )
-
-    def _handle_link_removed(self, link_id: str) -> None:
-        document = self._load_document()
-        filtered_items: list[dict[str, Any]] = []
-        touched = False
-        for item in document.items:
-            payload = dict(item)
-            if payload.get("type") == "knowledge.kb_edge" and payload.get("link_id") == link_id:
-                touched = True
-                continue
-            filtered_items.append(payload)
-
-        if touched:
-            self._save_document(
-                CanvasDocument(
-                    version=document.version,
-                    items=filtered_items,
-                    metadata=document.metadata,
-                    overlays=document.overlays,
-                    bookmarks=document.bookmarks,
-                )
-            )
-
-    def _handle_link_type_upserted(self, link_type_id: str) -> None:
-        if self._knowledge_io.repository.find_link_type(link_type_id) is None:
+        record: dict[str, Any] = {
+            "schema_version": 1,
+            "event_type": event_type,
+            "entity_id": entity_id,
+            "entity_type": "canvas",
+            "bundle_id": None,
+            "timestamp": time.time(),
+            "process_id": os.getpid(),
+            "violations": [],
+        }
+        try:
+            append_journal_record(repo_root, _CANVAS_EVENT_STREAM, record)
+        except Exception:
             return None
+        return record
 
-        document = self._load_document()
-        metadata = dict(document.metadata)
-        visibility = dict(metadata.get("link_type_visibility", {}))
-        if link_type_id in visibility:
-            return None
-
-        visibility[link_type_id] = {"visible": True}
-        metadata["link_type_visibility"] = visibility
-        self._save_document(
-            CanvasDocument(
-                version=document.version,
-                items=document.items,
-                metadata=metadata,
-                overlays=document.overlays,
-                bookmarks=document.bookmarks,
-            )
-        )
+    @staticmethod
+    def _diff_canvas_object_ids(
+        before: CanvasDocument,
+        after: CanvasDocument,
+    ) -> frozenset[str]:
+        before_ids = {
+            str(obj.get("node_id") or obj.get("link_id") or idx)
+            for idx, obj in enumerate(before.objects)
+        }
+        after_ids = {
+            str(obj.get("node_id") or obj.get("link_id") or idx)
+            for idx, obj in enumerate(after.objects)
+        }
+        return frozenset(before_ids | after_ids)
 
     def _sidecar_path(self) -> Path:
         base = self._view_path.stem
@@ -2162,8 +2598,8 @@ class CanvasIO(KnowledgeChangeListener):
 
     def _indexed_kb_nodes(self, document: CanvasDocument) -> dict[str, tuple[int, dict[str, Any]]]:
         out: dict[str, tuple[int, dict[str, Any]]] = {}
-        for idx, item in enumerate(document.items):
-            payload = dict(item)
+        for idx, obj in enumerate(document.objects):
+            payload = dict(obj)
             if payload.get("type") != "knowledge.kb_node":
                 continue
             node_id = str(payload.get("node_id", ""))

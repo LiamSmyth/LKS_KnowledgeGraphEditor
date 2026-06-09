@@ -15,6 +15,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from ai.mcp.knowledge.common import _build_io, result_envelope
+from lks_utils.knowledge.canvas.canvas_io import CanvasIO
 from lks_utils.knowledge.io.delete_resolution import (
     DeleteResolution,
     DeleteResolutionEntry,
@@ -61,8 +62,67 @@ def _resolution_from_dict(data: list[dict[str, Any]]) -> DeleteResolution:
     return DeleteResolution(entries=tuple(entries))
 
 
+def delete_node_and_clean_canvas_impl(
+    path: str,
+    node_id: str,
+    *,
+    force_cascade: bool = True,
+) -> dict[str, Any]:
+    """Delete one KB node and run scoped projection hygiene on affected canvases."""
+    io = _build_io(path)
+    preview = io.check_delete_impact(node_id)
+    if not force_cascade and int(preview.get("blocking_link_count", 0)) > 0:
+        return {
+            "status": "blocked",
+            "touched_ids": [],
+            "validated_ids": [],
+            "issues": [],
+            "error_message": (
+                f"Node {node_id!r} has incident links; "
+                "set force_cascade=true or use delete_node_cascade."
+            ),
+            "blocking_impact": preview,
+            "affected_view_paths": list(preview.get("affected_view_paths", [])),
+            "hygiene_views_updated": [],
+        }
+
+    result = io.delete_node_cascade(node_id)
+    out: dict[str, Any] = result_envelope(result)
+    affected_paths = list(preview.get("affected_view_paths", []))
+    out["affected_view_paths"] = affected_paths
+    hygiene_views: list[str] = []
+    if result.ok and result.effects is not None and affected_paths:
+        hygiene_views = CanvasIO.apply_projection_hygiene_for_effects(
+            io,
+            result.effects,
+            affected_view_ids=frozenset(affected_paths),
+        )
+    out["hygiene_views_updated"] = hygiene_views
+    if result.blocking_impact is not None:
+        out["blocking_impact"] = _impact_to_dict(result.blocking_impact)
+    return out
+
+
 def register_destructive_tools(mcp: FastMCP) -> None:
     """Register the two-phase delete tools on *mcp*."""
+
+    @mcp.tool()
+    def delete_node_and_clean_canvas(
+        path: str,
+        node_id: str,
+        force_cascade: bool = True,
+    ) -> dict[str, Any]:
+        """[MUTATES] Delete one KB node and remove stale canvas placements in affected views.
+
+        Runs index-backed delete fanout preview, cascade-deletes incident links,
+        then applies scoped ``ProjectionHygiene`` on ``affected_view_paths``.
+        Prefer this over ``delete_node`` + manual canvas cleanup for MCP agents.
+        """
+        return delete_node_and_clean_canvas_impl(
+            path,
+            node_id,
+            force_cascade=force_cascade,
+        )
 
     @mcp.tool()
     def check_delete_impact(path: str, node_ids: list[str]) -> dict[str, Any]:

@@ -7,8 +7,21 @@ from lks_utils.knowledge.io.delete_resolution import (
     DeleteResolutionMode,
 )
 from lks_utils.knowledge.io.knowledge_io import KnowledgeIO
+from lks_utils.knowledge.io.knowledge_change_journal_dispatcher import (
+    KnowledgeChangeJournalDispatcher,
+)
 from lks_utils.knowledge.knowledge_change_listener import KnowledgeChangeListener
 from lks_utils.knowledge.io.link_impact import LinkDeleteImpact, LinkTypeDeleteImpact
+from lks_utils.knowledge.io.mutation_effects import (
+    JournalContext,
+    MutationEffects,
+    MutationKind,
+)
+from lks_utils.knowledge.io.mutation_policy import (
+    CanvasHygieneHint,
+    PolicyResult,
+    resolve_policy,
+)
 from lks_utils.knowledge.io.operation_result import (
     OperationResult,
     ValidationIssue,
@@ -24,7 +37,14 @@ from lks_utils.knowledge.io.type_change_resolution import (
 
 __all__ = [
     "KnowledgeIO",
+    "KnowledgeChangeJournalDispatcher",
     "KnowledgeChangeListener",
+    "JournalContext",
+    "MutationEffects",
+    "MutationKind",
+    "CanvasHygieneHint",
+    "PolicyResult",
+    "resolve_policy",
     "OperationResult",
     "ValidationIssue",
     "ValidationMode",

@@ -92,7 +92,6 @@ def _resolve_target_type_node(repo: Repository, slot: NodeSlot) -> Node | None:
         "any",
         "object",
         "string",
-        "str",
         "int",
         "integer",
         "float",

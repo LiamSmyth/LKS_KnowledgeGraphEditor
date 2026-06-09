@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from lks_utils.gui_qt.canvas2d.canvas_item_registry import get_canvas_item_type
+from lks_utils.gui_qt.canvas2d.canvas_object_registry import get_canvas_object_type
 
 
 @dataclass(frozen=True)
@@ -14,7 +14,7 @@ class CanvasDocument:
     """Serializable knowledge-canvas document payload."""
 
     version: int = 1
-    items: list[dict[str, Any]] = field(default_factory=list)
+    objects: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     overlays: list[dict[str, Any]] = field(default_factory=list)
     bookmarks: list[dict[str, Any]] = field(default_factory=list)
@@ -23,7 +23,7 @@ class CanvasDocument:
         """Return a JSON-serializable mapping for this document."""
         return {
             "version": self.version,
-            "items": [dict(item) for item in self.items],
+            "objects": [dict(obj) for obj in self.objects],
             "metadata": dict(self.metadata),
             "overlays": [dict(overlay) for overlay in self.overlays],
             "bookmarks": [dict(bookmark) for bookmark in self.bookmarks],
@@ -34,7 +34,10 @@ class CanvasDocument:
         """Build a document from a mapping with graceful defaults."""
         return CanvasDocument(
             version=int(payload.get("version", 1)),
-            items=[dict(item) for item in payload.get("items", [])],
+            objects=[
+                dict(obj)
+                for obj in payload.get("objects", payload.get("items", []))
+            ],
             metadata=dict(payload.get("metadata", {})),
             overlays=[dict(overlay)
                       for overlay in payload.get("overlays", [])],
@@ -73,31 +76,31 @@ def save_canvas_document(document: CanvasDocument, path: str | Path) -> None:
 
 def _from_payload(payload: dict[str, Any]) -> CanvasDocument:
     document = CanvasDocument.from_dict(payload)
-    normalized_items: list[dict[str, Any]] = []
-    for item_payload in document.items:
-        if not isinstance(item_payload, dict):
+    normalized_objects: list[dict[str, Any]] = []
+    for object_payload in document.objects:
+        if not isinstance(object_payload, dict):
             continue
 
-        item_type = item_payload.get("type")
-        if not isinstance(item_type, str):
-            normalized_items.append(dict(item_payload))
+        object_type = object_payload.get("type")
+        if not isinstance(object_type, str):
+            normalized_objects.append(dict(object_payload))
             continue
 
-        item_cls = get_canvas_item_type(item_type)
-        if item_cls is None or not hasattr(item_cls, "from_dict"):
-            normalized_items.append(dict(item_payload))
+        object_cls = get_canvas_object_type(object_type)
+        if object_cls is None or not hasattr(object_cls, "from_dict"):
+            normalized_objects.append(dict(object_payload))
             continue
 
-        item_obj = item_cls.from_dict(item_payload)
-        item_dict = item_obj.to_dict() if hasattr(item_obj, "to_dict") else None
-        if isinstance(item_dict, dict):
-            normalized_items.append(item_dict)
+        object_obj = object_cls.from_dict(object_payload)
+        object_dict = object_obj.to_dict() if hasattr(object_obj, "to_dict") else None
+        if isinstance(object_dict, dict):
+            normalized_objects.append(object_dict)
         else:
-            normalized_items.append(dict(item_payload))
+            normalized_objects.append(dict(object_payload))
 
     return CanvasDocument(
         version=document.version,
-        items=normalized_items,
+        objects=normalized_objects,
         metadata=dict(document.metadata),
         overlays=list(document.overlays),
         bookmarks=list(document.bookmarks),

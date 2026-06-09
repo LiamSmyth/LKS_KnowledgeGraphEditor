@@ -65,7 +65,7 @@ class LinkMutationBridge:
         link_type_id: str,
         source_node_id: str,
         target_node_id: str,
-    ) -> LinkInstance:
+    ) -> tuple[LinkInstance, object | None]:
         """Create and store one ad-hoc link record."""
         try:
             link_type = self._repository.get_link_type(link_type_id)
@@ -136,21 +136,22 @@ class LinkMutationBridge:
         )
         if self._io is None:
             self._repository.upsert_link(link)
-        else:
-            result = self._io.upsert_link(link)
-            if not result.ok:
-                raise ValueError(
-                    result.error_message or "Failed to create link")
-        return link
+            return link, None
+        result = self._io.upsert_link(link)
+        if not result.ok:
+            raise ValueError(
+                result.error_message or "Failed to create link")
+        return link, result
 
-    def delete_link(self, link_id: str) -> None:
+    def delete_link(self, link_id: str) -> object | None:
         """Delete one link instance by id."""
         if self._io is None:
             self._repository.delete_link(link_id)
-            return
+            return None
         result = self._io.remove_link(link_id)
         if not result.ok:
             raise KeyError(link_id)
+        return result
 
     def _matches_constraint(self, node: object, constraint: str | None) -> bool:
         if constraint is None or not constraint.strip():

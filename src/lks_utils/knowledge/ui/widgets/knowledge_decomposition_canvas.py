@@ -6,7 +6,7 @@ from typing import Protocol
 from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QKeyEvent, QKeySequence
 
 from lks_utils.gui_qt.canvas2d import CANVAS_DELETE_SELECTED
-from lks_utils.gui_qt.canvas2d.canvas2d_capabilities import Canvas2DCapabilities
+from lks_utils.gui_qt.canvas2d.widgets.canvas_widget_policies import CanvasWidgetPolicies
 from lks_utils.input import get_default_bindings
 from lks_utils.knowledge.ui.components.library_panel import MIME_KNOWLEDGE_NODE_ID
 from lks_utils.knowledge.ui.widgets.knowledge_edit_canvas import QKnowledgeEditCanvasWidget
@@ -31,7 +31,7 @@ class _KnowledgeDecompositionCanvas(QKnowledgeEditCanvasWidget):
     ) -> None:
         super().__init__(
             parent,
-            capabilities=Canvas2DCapabilities(
+            capabilities=CanvasWidgetPolicies(
                 allow_selection=True,
                 bring_selected_to_front=False,
                 allow_multi_select=False,

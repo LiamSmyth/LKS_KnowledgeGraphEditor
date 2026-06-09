@@ -6,6 +6,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from ai.mcp.knowledge.common import _build_io, result_envelope
+from ai.mcp.knowledge.tools_nodes import _enforce_instance_contract
 from lks_utils.knowledge.links.link_instance import LinkInstance
 from lks_utils.knowledge.links.link_type import LinkType
 from lks_utils.knowledge.models.node import Node
@@ -88,18 +89,56 @@ def apply_batch_mutation_impl(
             if "type_id" not in payload and existing.type_id is not None:
                 payload["type_id"] = str(existing.type_id)
 
+        if category != "_type" and "type_id" not in payload:
+            statuses.append("error")
+            results["nodes"].append(
+                {
+                    "name": name,
+                    "category": category,
+                    "status": "error",
+                    "id": str(existing.id) if existing is not None else None,
+                    "error_message": "Instance nodes must provide type_id.",
+                }
+            )
+            continue
+
         validated = Node.model_validate(payload)
+        try:
+            _enforce_instance_contract(io, validated)
+        except ValueError as exc:
+            statuses.append("error")
+            results["nodes"].append(
+                {
+                    "name": name,
+                    "category": category,
+                    "status": "error",
+                    "id": str(validated.id),
+                    "error_message": str(exc),
+                }
+            )
+            continue
         op = io.upsert_node(validated)
         touched_ids.update(op.touched_ids)
         statuses.append(op.status)
-        results["nodes"].append(
-            {
-                "name": name,
-                "category": category,
-                "status": "created" if existing is None else "updated",
-                "id": str(validated.id),
-            }
-        )
+        if op.ok:
+            results["nodes"].append(
+                {
+                    "name": name,
+                    "category": category,
+                    "status": "created" if existing is None else "updated",
+                    "id": str(validated.id),
+                }
+            )
+        else:
+            results["nodes"].append(
+                {
+                    "name": name,
+                    "category": category,
+                    "status": "error",
+                    "id": str(validated.id),
+                    "error_message": op.error_message,
+                }
+            )
 
     for spec in link_type_ensures:
         name = str(spec.get("name", "")).strip()
@@ -173,12 +212,17 @@ def apply_batch_mutation_impl(
         results["links"].append({"status": "created", "id": validated.id})
 
     status = "ok" if all(item == "ok" for item in statuses) else "error"
+    error_messages = [
+        item.get("error_message")
+        for item in results["nodes"] + results["link_types"] + results["links"]
+        if isinstance(item, dict) and item.get("error_message")
+    ]
     return {
         "status": status,
         "touched_ids": sorted(touched_ids),
         "validated_ids": [],
         "issues": [],
-        "error_message": None if status == "ok" else "One or more operations failed.",
+        "error_message": None if status == "ok" else (error_messages[0] if error_messages else "One or more operations failed."),
         "save_error": None,
         **results,
     }
@@ -190,6 +234,20 @@ def register_batch_tools(mcp: FastMCP) -> None:
         """[MUTATES] Insert or replace multiple nodes from typed objects."""
         io = _build_io(path)
         validated = [Node.model_validate(item) for item in nodes]
+        for node in validated:
+            try:
+                _enforce_instance_contract(io, node)
+            except ValueError as exc:
+                return {
+                    "status": "error",
+                    "touched_ids": [],
+                    "validated_ids": [],
+                    "issues": [],
+                    "error_message": f"Node {node.name!r} ({node.id}) rejected: {exc}",
+                    "save_error": None,
+                    "count": len(validated),
+                    "node_ids": [str(item.id) for item in validated],
+                }
         result = io.upsert_nodes(validated)
         return {
             **result_envelope(result),

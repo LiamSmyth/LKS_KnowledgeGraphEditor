@@ -2,15 +2,15 @@
 
 Pixmap migration note:
 - Node, graph-node, and field-node cards are QWidget-driven and rendered through
-    ``CanvasPixmapWidgetItem`` adapters.
+    ``CanvasPixmapWidgetObject`` adapters.
 - The following items intentionally remain paint-based canvas primitives because
     they represent connector/overlay semantics rather than card content widgets:
-    ``QKnowledgePortStubCanvasItem``, ``QKnowledgeGraphLinkCanvasItem``,
-    ``_KnowledgeEdgeCanvasItem``, and canvas overlays (for example dot grid).
+    ``QKnowledgePortStubCanvasObject``, ``QKnowledgeGraphLinkCanvasObject``,
+    ``_KnowledgeEdgeCanvasObject``, and canvas overlays (for example dot grid).
 """
 from __future__ import annotations
 
-from lks_utils.knowledge.ui.widgets.field_node_canvas_item import QKnowledgeFieldNodeCanvasItem
+from lks_utils.knowledge.ui.widgets.field_node_canvas_object import QKnowledgeFieldNodeCanvasObject
 from lks_utils.knowledge.ui.widgets.field_widgets import (
     ClearFieldButton,
     TypeComboBox,
@@ -26,12 +26,12 @@ from lks_utils.knowledge.ui.widgets.field_widgets import (
 )
 from lks_utils.knowledge.ui.widgets.graph_canvas import QKnowledgeGraphCanvasWidget
 from lks_utils.knowledge.ui.widgets.graph_node_widget import QKnowledgeGraphNodeWidget
-from lks_utils.knowledge.ui.widgets.graph_node_canvas_item import (
+from lks_utils.knowledge.ui.widgets.graph_node_canvas_object import (
     GraphNodeFieldRow,
-    QKnowledgeGraphNodeCanvasItem,
+    QKnowledgeGraphNodeCanvasObject,
 )
-from lks_utils.knowledge.ui.widgets.graph_link_canvas_item import (
-    QKnowledgeGraphLinkCanvasItem,
+from lks_utils.knowledge.ui.widgets.graph_link_canvas_object import (
+    QKnowledgeGraphLinkCanvasObject,
 )
 from lks_utils.knowledge.ui.widgets.field_node_widget import QKnowledgeFieldNodeWidget
 from lks_utils.knowledge.ui.widgets.node_properties_display_widget import (
@@ -45,10 +45,10 @@ __all__ = [
     "ClearFieldButton",
     "GraphNodeFieldRow",
     "QKnowledgeGraphCanvasWidget",
-    "QKnowledgeGraphLinkCanvasItem",
-    "QKnowledgeGraphNodeCanvasItem",
+    "QKnowledgeGraphLinkCanvasObject",
+    "QKnowledgeGraphNodeCanvasObject",
     "QKnowledgeGraphNodeWidget",
-    "QKnowledgeFieldNodeCanvasItem",
+    "QKnowledgeFieldNodeCanvasObject",
     "QKnowledgeFieldNodeWidget",
     "QKnowledgeNodePropertiesDisplayWidget",
     "QKnowledgeLinkTypeCanvasWidget",

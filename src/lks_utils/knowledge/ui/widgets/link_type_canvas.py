@@ -4,14 +4,14 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-from lks_utils.gui_qt.canvas2d.canvas_item import CanvasItem
+from lks_utils.gui_qt.canvas2d.canvas_object import CanvasObject
 from lks_utils.knowledge.display_color import effective_link_type_display_color
 from lks_utils.knowledge.editor_session import EditorSession
 from lks_utils.knowledge.links.link_type import LinkType
 from lks_utils.knowledge.ui.components.field_row_factory import FieldRow
 from lks_utils.knowledge.ui.widgets.knowledge_edit_canvas import QKnowledgeEditCanvasWidget
-from lks_utils.knowledge.ui.widgets.field_node_canvas_item import (
-    QKnowledgeFieldNodeCanvasItem,
+from lks_utils.knowledge.ui.widgets.field_node_canvas_object import (
+    QKnowledgeFieldNodeCanvasObject,
     knowledge_field_node_height_for_rows,
 )
 
@@ -33,7 +33,7 @@ class QKnowledgeLinkTypeCanvasWidget(QWidget):
         super().__init__(parent)
         self._session = session
         self._link_type: LinkType | None = None
-        self._canvas_items: list[CanvasItem] = []
+        self._canvas_objects: list[CanvasObject] = []
 
         self._canvas = QKnowledgeEditCanvasWidget(self)
         self._canvas.setMinimumSize(720, 420)
@@ -53,7 +53,7 @@ class QKnowledgeLinkTypeCanvasWidget(QWidget):
 
         rows = self._rows_for_link_type(link_type)
         root_h = knowledge_field_node_height_for_rows(rows)
-        root = QKnowledgeFieldNodeCanvasItem(
+        root = QKnowledgeFieldNodeCanvasObject(
             node_id=str(link_type.id),
             node_name=link_type.name,
             x=_ROOT_X0,
@@ -65,7 +65,7 @@ class QKnowledgeLinkTypeCanvasWidget(QWidget):
             header_bg_color=effective_link_type_display_color(link_type),
             header_subtitle="link_type",
         )
-        self._add_item(root)
+        self._add_object(root)
         self._canvas.fit_to_content(buffer_world_px=40.0)
         self._canvas.camera.set_zoom(
             min(self._canvas.camera.view().zoom, 1.35))
@@ -81,14 +81,14 @@ class QKnowledgeLinkTypeCanvasWidget(QWidget):
         """Return the currently loaded link type."""
         return self._link_type
 
-    def _add_item(self, item: CanvasItem) -> None:
-        self._canvas.add_item(item)
-        self._canvas_items.append(item)
+    def _add_object(self, item: CanvasObject) -> None:
+        self._canvas.add_object(item)
+        self._canvas_objects.append(item)
 
     def _clear_canvas(self) -> None:
-        for item in self._canvas_items:
-            self._canvas.remove_item(item)
-        self._canvas_items = []
+        for item in self._canvas_objects:
+            self._canvas.remove_object(item)
+        self._canvas_objects = []
 
     def _rows_for_link_type(self, link_type: LinkType) -> list[FieldRow]:
         cardinality = (

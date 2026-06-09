@@ -11,7 +11,7 @@ echo Installing PyInstaller into sandbox venv...
 if errorlevel 1 (echo PyInstaller install failed & pause & exit /b 1)
 echo.
 echo Building executable...
-.venv\Scripts\pyinstaller --onefile --windowed --name lks_knowledge_graph_editor --hidden-import _cffi_backend --collect-data lks_utils.gui_qt.canvas2d --collect-data lks_utils.gui_qt --collect-data lks_utils.knowledge --collect-data lks_utils.knowledge.ui src\lks_utils\knowledge\demo\demo_workbench_ui_gui.py
+.venv\Scripts\pyinstaller --onefile --windowed --name lks_knowledge_graph_editor --hidden-import _cffi_backend --collect-data lks_utils.gui_qt.canvas2d --collect-data lks_utils.gui_qt --collect-data lks_utils.input --collect-data lks_utils.knowledge --collect-data lks_utils.knowledge.ui src\lks_utils\knowledge\demo\demo_workbench_ui_gui.py
 if errorlevel 1 (echo Build failed & pause & exit /b 1)
 echo.
 echo Done. Check dist\ for the built executable.

@@ -48,8 +48,8 @@ def _ensure_unique_local_id(base: str, used_ids: set[str]) -> str:
 def _graph_view_from_canvas_payload(payload: object, *, fallback_path: Path) -> GraphView | None:
     if not isinstance(payload, dict):
         return None
-    raw_items = payload.get("items")
-    if not isinstance(raw_items, list):
+    raw_objects = payload.get("objects", payload.get("items"))
+    if not isinstance(raw_objects, list):
         return None
 
     document = CanvasDocument.from_dict(payload)
@@ -68,22 +68,22 @@ def _graph_view_from_canvas_payload(payload: object, *, fallback_path: Path) -> 
     nodes: dict[str, GraphViewNodeProxy] = {}
     node_local_by_global: dict[str, str] = {}
     used_local_ids: set[str] = set()
-    for item in document.items:
-        item_type = item.get("type")
+    for obj in document.objects:
+        item_type = obj.get("type")
         if item_type != "knowledge.kb_node":
             continue
-        global_id_obj = item.get("node_id")
+        global_id_obj = obj.get("node_id")
         if global_id_obj is None:
             continue
         global_id = str(global_id_obj)
         if not global_id.strip():
             continue
-        x = float(item.get("x", 0.0))
-        y = float(item.get("y", 0.0))
-        cached_name_obj = item.get("label")
+        x = float(obj.get("x", 0.0))
+        y = float(obj.get("y", 0.0))
+        cached_name_obj = obj.get("label")
         cached_name = str(
             cached_name_obj) if cached_name_obj is not None else ""
-        raw_local_id = item.get("local_id")
+        raw_local_id = obj.get("local_id")
         base_local_id = str(
             raw_local_id) if raw_local_id is not None else global_id
         local_id = _ensure_unique_local_id(base_local_id, used_local_ids)
@@ -97,13 +97,13 @@ def _graph_view_from_canvas_payload(payload: object, *, fallback_path: Path) -> 
 
     edges: dict[str, GraphViewEdgeProxy] = {}
     used_edge_ids: set[str] = set()
-    for item in document.items:
-        item_type = item.get("type")
+    for obj in document.objects:
+        item_type = obj.get("type")
         if item_type != "knowledge.kb_edge":
             continue
-        link_id_obj = item.get("link_id")
-        from_node_obj = item.get("from_node_id")
-        to_node_obj = item.get("to_node_id")
+        link_id_obj = obj.get("link_id")
+        from_node_obj = obj.get("from_node_id")
+        to_node_obj = obj.get("to_node_id")
         if link_id_obj is None or from_node_obj is None or to_node_obj is None:
             continue
         link_id = str(link_id_obj)
@@ -111,8 +111,8 @@ def _graph_view_from_canvas_payload(payload: object, *, fallback_path: Path) -> 
         to_global = str(to_node_obj)
         source_local = None
         target_local = None
-        source_local_obj = item.get("source_local_id")
-        target_local_obj = item.get("target_local_id")
+        source_local_obj = obj.get("source_local_id")
+        target_local_obj = obj.get("target_local_id")
         if source_local_obj is not None and target_local_obj is not None:
             source_local = str(source_local_obj)
             target_local = str(target_local_obj)
@@ -121,7 +121,7 @@ def _graph_view_from_canvas_payload(payload: object, *, fallback_path: Path) -> 
             target_local = node_local_by_global.get(to_global)
         if source_local is None or target_local is None:
             continue
-        raw_edge_local = item.get("local_id")
+        raw_edge_local = obj.get("local_id")
         base_edge_local = str(
             raw_edge_local) if raw_edge_local is not None else link_id
         edge_local = _ensure_unique_local_id(base_edge_local, used_edge_ids)
@@ -135,13 +135,13 @@ def _graph_view_from_canvas_payload(payload: object, *, fallback_path: Path) -> 
 
 
 def _graph_view_to_canvas_payload(view: GraphView) -> dict[str, Any]:
-    items: list[dict[str, Any]] = []
+    objects: list[dict[str, Any]] = []
     global_by_local = {
         local_id: proxy.global_id for local_id, proxy in view.nodes.items()
     }
 
     for local_id, proxy in view.nodes.items():
-        item: dict[str, Any] = {
+        object_payload: dict[str, Any] = {
             "type": "knowledge.kb_node",
             "local_id": local_id,
             "node_id": proxy.global_id,
@@ -151,15 +151,15 @@ def _graph_view_to_canvas_payload(view: GraphView) -> dict[str, Any]:
             "height": _DEFAULT_NODE_HEIGHT,
         }
         if proxy.cached_name:
-            item["label"] = proxy.cached_name
-        items.append(item)
+            object_payload["label"] = proxy.cached_name
+        objects.append(object_payload)
 
     for local_id, edge in view.edges.items():
         from_global = global_by_local.get(edge.source_local_id)
         to_global = global_by_local.get(edge.target_local_id)
         if from_global is None or to_global is None:
             continue
-        items.append(
+        objects.append(
             {
                 "type": "knowledge.kb_edge",
                 "local_id": local_id,
@@ -173,7 +173,7 @@ def _graph_view_to_canvas_payload(view: GraphView) -> dict[str, Any]:
 
     document = CanvasDocument(
         version=1,
-        items=items,
+        objects=objects,
         metadata={
             _SCHEMA_TYPE_KEY: _SCHEMA_TYPE_VALUE,
             _KB_REPO_PATH_KEY: "../",

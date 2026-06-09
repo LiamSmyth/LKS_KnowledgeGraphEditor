@@ -8,8 +8,19 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QVBoxLayout,
+    QWidget,
+)
 
+from lks_utils.git._git_service.stash import StashInfo
 from lks_utils.knowledge.default_theme import (
     EDGE_COLOR,
     NODE_TEXT_COLOR,
@@ -101,6 +112,17 @@ class QKnowledgeEditorTabBase(QWidget):
             )
             return False
 
+        # If autosave stashes exist, show the full selection dialog.
+        stashes = git.list_stashes()
+        if stashes:
+            return self._show_revert_selection_dialog(
+                core_label=core_label,
+                rel_path=rel_path,
+                last_commit=commit,
+                stashes=stashes,
+                git=git,
+            )
+
         age_text = self._format_commit_age_text(commit.commit_time)
         answer = QMessageBox.question(
             self,
@@ -117,6 +139,49 @@ class QKnowledgeEditorTabBase(QWidget):
 
         try:
             git.revert_file(rel_path)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Revert Failed", str(exc))
+            return False
+
+    def _show_revert_selection_dialog(
+        self,
+        *,
+        core_label: str,
+        rel_path: str,
+        last_commit: object,
+        stashes: list[StashInfo],
+        git: object,
+    ) -> bool | None:
+        """Show a dialog letting the user pick from last-commit or autosave stashes.
+
+        Returns:
+            ``True`` when a revert or stash-apply was applied.
+            ``False`` when the user canceled.
+        """
+        from lks_utils.knowledge.commit_info import CommitInfo
+
+        dialog = _QKnowledgeRevertSelectionDialog(
+            core_label=core_label,
+            last_commit=last_commit if isinstance(
+                last_commit, CommitInfo) else None,
+            stashes=stashes,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return False
+
+        choice = dialog.selected_choice()
+        if choice is None:
+            return False
+
+        try:
+            if choice == "last_commit":
+                git.revert_file(rel_path)
+            elif isinstance(choice, StashInfo):
+                git.stash_apply(choice.index)
+            else:
+                return False
             return True
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Revert Failed", str(exc))
@@ -155,6 +220,119 @@ class QKnowledgeEditorTabBase(QWidget):
             f"QWidget#canvas_ribbon {{ background: #1e1e1e; border-bottom: 1px solid {EDGE_COLOR}; }}"
             f"QLabel#canvas_title {{ color: {NODE_TEXT_COLOR}; font-weight: 600; }}"
         )
+
+
+# ------------------------------------------------------------------
+# Revert Selection Dialog
+# ------------------------------------------------------------------
+
+
+class _QKnowledgeRevertSelectionDialog(QDialog):
+    """Modal dialog listing last-commit and autosave stashes for revert."""
+
+    _CHOICE_LAST_COMMIT = "last_commit"
+
+    def __init__(
+        self,
+        *,
+        core_label: str,
+        last_commit: object | None,
+        stashes: list[StashInfo],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Revert — Select Source")
+        self.setMinimumSize(500, 320)
+        self._core_label = core_label
+        self._last_commit = last_commit
+        self._stashes = stashes
+        self._selected_choice: str | StashInfo | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        label = QLabel(
+            f"Choose a restore point for this {core_label}:", self
+        )
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        self._list = QListWidget(self)
+        self._list.setAlternatingRowColors(True)
+        layout.addWidget(self._list, stretch=1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel,
+            self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._populate_list()
+
+    def _populate_list(self) -> None:
+        """Fill list with last-commit entry (first) then stashes (newest first)."""
+        # Last commit entry
+        if self._last_commit is not None:
+            from lks_utils.knowledge.commit_info import CommitInfo
+
+            lc: CommitInfo = self._last_commit  # type: ignore[assignment]
+            now = datetime.now(timezone.utc)
+            then = datetime.fromtimestamp(lc.commit_time, tz=timezone.utc)
+            seconds = max(0, int((now - then).total_seconds()))
+            if seconds < 60:
+                age = "just now"
+            else:
+                minutes = seconds // 60
+                if minutes < 60:
+                    age = f"{minutes}m"
+                else:
+                    hours = minutes // 60
+                    if hours < 24:
+                        age = f"{hours}h"
+                    else:
+                        days = hours // 24
+                        if days < 30:
+                            age = f"{days}d"
+                        else:
+                            months = days // 30
+                            if months < 12:
+                                age = f"{months}mo"
+                            else:
+                                years = months // 12
+                                age = f"{years}y"
+            item = QListWidgetItem(
+                f"Last commit ({age}) — {lc.message}", self._list
+            )
+            item.setData(Qt.ItemDataRole.UserRole, self._CHOICE_LAST_COMMIT)
+            item.setToolTip(f"SHA: {lc.sha}\n{lc.message}")
+
+        # Stash entries (already newest-first from list_stashes)
+        for stash in self._stashes:
+            item = QListWidgetItem(
+                f"Autosave: {stash.formatted_time} — {stash.message}",
+                self._list,
+            )
+            item.setData(Qt.ItemDataRole.UserRole, stash)
+            item.setToolTip(f"SHA: {stash.commit_id}")
+
+        # Select first item by default
+        if self._list.count() > 0:
+            self._list.setCurrentRow(0)
+
+    def selected_choice(self) -> str | StashInfo | None:
+        """Return the user's selection, or None."""
+        return self._selected_choice
+
+    def accept(self) -> None:
+        current = self._list.currentItem()
+        if current is not None:
+            data = current.data(Qt.ItemDataRole.UserRole)
+            self._selected_choice = data
+        super().accept()
 
 
 __all__ = ["QKnowledgeEditorTabBase"]

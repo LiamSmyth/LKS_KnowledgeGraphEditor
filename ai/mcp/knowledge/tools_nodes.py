@@ -12,6 +12,101 @@ from ai.mcp.knowledge.common import (
     result_envelope,
 )
 from lks_utils.knowledge.models.node import Node
+from lks_utils.knowledge.models.type import as_type, is_type
+
+
+def _enforce_instance_contract(io: Any, node: Node) -> None:
+    """Reject untyped or schema-violating instance payloads.
+
+    Contract:
+    - only ``_type`` nodes may omit ``type_id``
+    - instance ``type_id`` must reference a type node
+    - instance ``props`` keys must be declared slots on the type
+    """
+    if node.category == "_type":
+        return
+
+    if node.type_id is None:
+        raise ValueError("Instance nodes must provide type_id.")
+
+    type_node = io.find_node(str(node.type_id))
+    if type_node is None:
+        raise ValueError(f"Type node not found: {node.type_id}")
+    if not is_type(type_node):
+        raise ValueError(
+            f"type_id {node.type_id} does not reference a type node")
+
+    type_model = as_type(type_node)
+    declared_slots = {slot.name for slot in type_model.slots}
+    unknown = sorted({key for key in node.props if key not in declared_slots})
+    if unknown:
+        raise ValueError(f"Unknown slot keys: {unknown}")
+
+
+def ensure_instance_impl(
+    path: str,
+    name: str,
+    category: str,
+    description: str = "",
+    props: dict[str, Any] | None = None,
+    type_id: str | None = None,
+    type_name: str | None = None,
+) -> dict[str, Any]:
+    """Create or update an instance node by (name, category) and return its payload.
+
+    Returns a dict with keys: ``status``, ``created``, ``node``, plus the
+    standard ``OperationResult`` envelope fields (``touched_ids``,
+    ``validated_ids``, ``issues``, ``error_message``, ``save_error``).
+    """
+    io = _build_io(path)
+    matches = [
+        node for node in io.list_nodes() if node.name == name and node.category == category
+    ]
+    if len(matches) > 1:
+        raise ValueError(
+            f"Ambiguous instance identity (name={name!r}, category={category!r}); multiple matches found."
+        )
+    existing = matches[0] if matches else None
+
+    resolved_type_id = type_id
+    if type_name is not None:
+        type_matches = [
+            node for node in io.list_nodes() if node.name == type_name and node.category == "_type"
+        ]
+        if len(type_matches) > 1:
+            raise ValueError(
+                f"Ambiguous type node name {type_name!r}; multiple matches found.")
+        type_node = type_matches[0] if type_matches else None
+        if type_node is None:
+            raise KeyError(f"Type not found by name: {type_name}")
+        resolved_type_id = str(type_node.id)
+
+    payload: dict[str, Any] = {
+        "category": category,
+        "name": name,
+        "description": description,
+        "props": props or {},
+        "source_repo_id": io.source_repo_id,
+    }
+    created = existing is None
+    if existing is not None:
+        payload["id"] = str(existing.id)
+        if resolved_type_id is None and existing.type_id is not None:
+            resolved_type_id = str(existing.type_id)
+
+    if resolved_type_id is None:
+        raise ValueError("ensure_instance requires type_id or type_name")
+    payload["type_id"] = resolved_type_id
+
+    validated = Node.model_validate(payload)
+    _enforce_instance_contract(io, validated)
+    result = io.upsert_node(validated)
+    persisted = io.find_node(str(validated.id))
+    return {
+        **result_envelope(result),
+        "created": created,
+        "node": persisted.model_dump() if persisted is not None else None,
+    }
 
 
 def register_node_tools(mcp: FastMCP) -> None:
@@ -44,6 +139,19 @@ def register_node_tools(mcp: FastMCP) -> None:
         """[MUTATES] Insert or replace one node from a typed object."""
         validated = Node.model_validate(node)
         io = _build_io(path)
+        try:
+            _enforce_instance_contract(io, validated)
+        except ValueError as exc:
+            return {
+                "status": "rejected",
+                "touched_ids": [],
+                "validated_ids": [],
+                "issues": [],
+                "error_message": str(exc),
+                "save_error": None,
+                "violations": [],
+                "node": None,
+            }
         violations = io.validate_upsert_node(validated)
         if violations:
             return {
@@ -115,51 +223,15 @@ def register_node_tools(mcp: FastMCP) -> None:
         type_name: str | None = None,
     ) -> dict[str, Any]:
         """[MUTATES] Ensure an instance node exists by (name, category) and upsert it."""
-        io = _build_io(path)
-        matches = [
-            node for node in io.list_nodes() if node.name == name and node.category == category
-        ]
-        if len(matches) > 1:
-            raise ValueError(
-                f"Ambiguous instance identity (name={name!r}, category={category!r}); multiple matches found."
-            )
-        existing = matches[0] if matches else None
-
-        resolved_type_id = type_id
-        if type_name is not None:
-            type_matches = [
-                node for node in io.list_nodes() if node.name == type_name and node.category == "_type"
-            ]
-            if len(type_matches) > 1:
-                raise ValueError(
-                    f"Ambiguous type node name {type_name!r}; multiple matches found.")
-            type_node = type_matches[0] if type_matches else None
-            if type_node is None:
-                raise KeyError(f"Type not found by name: {type_name}")
-            resolved_type_id = str(type_node.id)
-
-        payload: dict[str, Any] = {
-            "category": category,
-            "name": name,
-            "description": description,
-            "props": props or {},
-            "source_repo_id": io.source_repo_id,
-        }
-        if resolved_type_id is not None:
-            payload["type_id"] = resolved_type_id
-        created = existing is None
-        if existing is not None:
-            payload["id"] = str(existing.id)
-            if "type_id" not in payload and existing.type_id is not None:
-                payload["type_id"] = str(existing.type_id)
-        validated = Node.model_validate(payload)
-        result = io.upsert_node(validated)
-        persisted = io.find_node(str(validated.id))
-        return {
-            **result_envelope(result),
-            "created": created,
-            "node": persisted.model_dump() if persisted is not None else None,
-        }
+        return ensure_instance_impl(
+            path=path,
+            name=name,
+            category=category,
+            description=description,
+            props=props,
+            type_id=type_id,
+            type_name=type_name,
+        )
 
     # ------------------------------------------------------------------
     # WO2: Property mutation tools

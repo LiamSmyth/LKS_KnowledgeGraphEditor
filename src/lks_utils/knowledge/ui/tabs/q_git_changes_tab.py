@@ -3,8 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -87,8 +86,8 @@ class QGitChangesTab(QWidget):
         banner_layout.setSpacing(6)
         self._shelf_banner_label = QLabel("", self._shelf_banner)
         self._recover_shelf_btn = QPushButton(
-            "Recover from shelf", self._shelf_banner)
-        self._recover_shelf_btn.clicked.connect(self._open_shelves_folder)
+            "List autosave stashes", self._shelf_banner)
+        self._recover_shelf_btn.clicked.connect(self._list_autosave_stashes)
         banner_layout.addWidget(self._shelf_banner_label)
         banner_layout.addStretch(1)
         banner_layout.addWidget(self._recover_shelf_btn)
@@ -188,15 +187,29 @@ class QGitChangesTab(QWidget):
                 git_service=self._git_service,
             )
             if self._session.repository_root is not None:
-                self._shelf_service = ShelfService(
-                    repository_root=self._session.repository_root,
-                    git_service=self._git_service,
-                    parent=self,
-                )
-                self._shelf_service.shelves_changed.connect(
-                    self._on_shelves_changed)
-                self._shelf_service.snapshot_created.connect(
-                    self._on_snapshot_created)
+                prefs = QSettings("lks_utils", "KnowledgeWorkbench")
+                prefs.beginGroup("workbench/autosave")
+                enabled = self._coerce_bool(prefs.value("enabled", True), True)
+                interval = self._coerce_float(
+                    prefs.value("interval_minutes", 5.0), 5.0, minimum=0.5)
+                max_stashes = self._coerce_int(
+                    prefs.value("max_stashes", 10), 10, minimum=1)
+                prefs.endGroup()
+
+                if enabled:
+                    self._shelf_service = ShelfService(
+                        repository_root=self._session.repository_root,
+                        git_service=self._git_service,
+                        interval_minutes=interval,
+                        max_stashes=max_stashes,
+                        parent=self,
+                    )
+                    self._shelf_service.shelves_changed.connect(
+                        self._on_shelves_changed)
+                    self._shelf_service.snapshot_created.connect(
+                        self._on_snapshot_created)
+                else:
+                    self._shelf_service = None
 
         if self._session is not None:
             self._session.add_change_listener(self._on_session_change)
@@ -216,6 +229,52 @@ class QGitChangesTab(QWidget):
         self._diff_view.setEnabled(loaded)
         self._commit_message.setEnabled(loaded)
         self._update_toolbar_state()
+
+    def reload_autosave_settings(self) -> None:
+        """Re-read autosave prefs from QSettings after preferences changes."""
+        if self._session is None or self._git_service is None:
+            return
+        if self._session.repository_root is None:
+            return
+
+        # Disconnect old shelf service
+        if self._shelf_service is not None:
+            try:
+                self._shelf_service.shelves_changed.disconnect(
+                    self._on_shelves_changed)
+            except Exception:
+                pass
+            try:
+                self._shelf_service.snapshot_created.disconnect(
+                    self._on_snapshot_created)
+            except Exception:
+                pass
+
+        prefs = QSettings("lks_utils", "KnowledgeWorkbench")
+        prefs.beginGroup("workbench/autosave")
+        enabled = self._coerce_bool(prefs.value("enabled", True), True)
+        interval = self._coerce_float(
+            prefs.value("interval_minutes", 5.0), 5.0, minimum=0.5)
+        max_stashes = self._coerce_int(
+            prefs.value("max_stashes", 10), 10, minimum=1)
+        prefs.endGroup()
+
+        if enabled:
+            self._shelf_service = ShelfService(
+                repository_root=self._session.repository_root,
+                git_service=self._git_service,
+                interval_minutes=interval,
+                max_stashes=max_stashes,
+                parent=self,
+            )
+            self._shelf_service.shelves_changed.connect(
+                self._on_shelves_changed)
+            self._shelf_service.snapshot_created.connect(
+                self._on_snapshot_created)
+        else:
+            self._shelf_service = None
+
+        self._update_shelf_banner()
 
     def set_changes(self, rel_paths: list[str]) -> None:
         """Replace change-list items shown in left pane."""
@@ -431,17 +490,15 @@ class QGitChangesTab(QWidget):
         if self._shelf_service is None:
             self._shelf_banner.setVisible(False)
             return
-        shelf_root = self._shelf_service.shelves_root
-        shelves = [path for path in shelf_root.iterdir(
-        ) if path.is_dir()] if shelf_root.exists() else []
-        has_shelves = bool(shelves)
-        self._shelf_banner.setVisible(has_shelves)
-        if has_shelves:
+        count = self._shelf_service.stash_count()
+        has_stashes = count > 0
+        self._shelf_banner.setVisible(has_stashes)
+        if has_stashes:
             warning = ""
             if self._invalid_changed_paths:
-                warning = f" | Warning: {len(self._invalid_changed_paths)} invalid changed item(s) may be shelved"
+                warning = f" | Warning: {len(self._invalid_changed_paths)} invalid changed item(s)"
             self._shelf_banner_label.setText(
-                f"Recoverable shelves: {len(shelves)}{warning}"
+                f"Autosave stashes: {count}{warning}"
             )
 
     def _update_staged_items_view(self) -> None:
@@ -490,12 +547,24 @@ class QGitChangesTab(QWidget):
             mapping[path.relative_to(root).as_posix()] = object_id
         return mapping
 
-    def _open_shelves_folder(self) -> None:
+    def _list_autosave_stashes(self) -> None:
+        """Show a dialog listing available autosave stashes."""
         if self._shelf_service is None:
             return
-        folder = self._shelf_service.shelves_root
-        folder.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        stashes = self._shelf_service.list_stashes()
+        if not stashes:
+            QMessageBox.information(
+                self, "No Stashes", "No autosave stashes are available.")
+            return
+
+        messages: list[str] = []
+        for s in stashes:
+            messages.append(f"[{s.index}] {s.formatted_time} — {s.message}")
+        QMessageBox.information(
+            self,
+            f"Autosave Stashes ({len(stashes)})",
+            "\n".join(messages),
+        )
 
     def _maybe_seed_commit_message(self) -> None:
         if self._commit_message.toPlainText().strip():
@@ -718,6 +787,35 @@ class QGitChangesTab(QWidget):
                 f"QPushButton {{ color: {FIELD_BUTTON_TEXT}; }}"
             )
         )
+
+    @staticmethod
+    def _coerce_bool(value: object, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().casefold()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+
+    @staticmethod
+    def _coerce_int(value: object, default: int, *, minimum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, parsed)
+
+    @staticmethod
+    def _coerce_float(
+        value: object, default: float, *, minimum: float
+    ) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, parsed)
 
 
 __all__ = ["QGitChangesTab"]

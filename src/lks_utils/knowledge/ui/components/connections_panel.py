@@ -21,10 +21,8 @@ from lks_utils.gui_qt.widgets.q_validation_badge import QValidationBadge
 from lks_utils.knowledge.editor_session import EditorSession
 from lks_utils.knowledge.editor_session_types import SessionChangeEvent
 from lks_utils.knowledge.data_interface.link_mutation_bridge import LinkMutationBridge
-from lks_utils.knowledge.io import KnowledgeIO
 from lks_utils.knowledge.links.link_instance import LinkInstance
 from lks_utils.knowledge.models.node import Node
-from lks_utils.knowledge.reverse_ref_index import ReverseRefIndex
 from lks_utils.knowledge.ui.components.ref_picker_dialog import QKnowledgeRefPickerDialog
 from lks_utils.knowledge.default_theme import (
     EDGE_COLOR,
@@ -122,25 +120,41 @@ class QKnowledgeConnectionsPanel(QWidget):
 
     def _sync_session_io_if_needed(self) -> None:
         """Keep IO aligned when callers swap session._repository directly."""
-        if self._session._io.repository is self._session._repository:  # noqa: SLF001
-            return
-        reverse_ref_index = ReverseRefIndex()
-        reverse_ref_index.rebuild_from(self._session._repository)  # noqa: SLF001
-        self._session._io = KnowledgeIO(  # noqa: SLF001
-            repository=self._session._repository,  # noqa: SLF001
-            reverse_ref_index=reverse_ref_index,
-            validation_index=self._session._validation_index,  # noqa: SLF001
-            repository_root=self._session._repository_root,  # noqa: SLF001
-        )
+        self._session.ensure_io_synced()
+
+    def _ensure_link_bridge_current(self) -> bool:
+        """Pin the link bridge to the current session IO/repository.
+
+        Returns True when the backing repository instance changed.
+        """
+        prev_repo = self._link_bridge._repository
+        self._sync_session_io_if_needed()
+        current_repo = self._session.knowledge_io.repository
+        if self._link_bridge._repository is not current_repo:
+            self._link_bridge = LinkMutationBridge(self._session.knowledge_io)
+        return prev_repo is not current_repo
 
     def set_node(self, node: Node | None) -> None:
         """Set the active node and populate the connections list."""
-        self._sync_session_io_if_needed()
-        # Session IO can be rebuilt on load/new_repo.
-        self._link_bridge = LinkMutationBridge(self._session._io)  # noqa: SLF001
+        repo_changed = self._ensure_link_bridge_current()
+        prev_id = (
+            str(self._current_node.id) if self._current_node is not None else None
+        )
+        new_id = str(node.id) if node is not None else None
+        if prev_id == new_id and node is not None and not repo_changed:
+            self._refresh_list()
+            return
+
         self._current_node = node
+        if prev_id != new_id:
+            self._selected_target_node_id = None
         self._refresh_list()
-        self._refresh_combos()
+        if repo_changed:
+            self._predicate_combo.clear()
+        self._ensure_predicate_combo_populated()
+        self._validate_selected_target()
+        self._refresh_target_display()
+        self._refresh_action_buttons()
 
     def _build_layout(self) -> None:
         root = QVBoxLayout(self)
@@ -235,7 +249,7 @@ class QKnowledgeConnectionsPanel(QWidget):
         change_type = event.change_type
         if change_type in {"repo_loaded", "node", "link"}:
             # Keep bridge pinned to the current session IO/repository instance.
-            self._link_bridge = LinkMutationBridge(self._session._io)  # noqa: SLF001
+            self._link_bridge = LinkMutationBridge(self._session.knowledge_io)
         if (
             change_type == "node"
             and self._current_node is not None
@@ -324,21 +338,31 @@ class QKnowledgeConnectionsPanel(QWidget):
             QSize(hint.width(), max(hint.height(), min_row_height)))
         return item, row, badge
 
-    def _refresh_combos(self) -> None:
-        self._predicate_combo.clear()
-
+    def _ensure_predicate_combo_populated(self) -> None:
+        if self._predicate_combo.count() > 0:
+            return
         link_types = self._session.list_link_types()
         for link_type in link_types:
             if link_type.is_system:
                 continue
             self._predicate_combo.addItem(link_type.name, str(link_type.id))
 
-        # Validate that the currently selected target node still exists.
-        nodes = self._candidate_target_nodes()
-        valid_ids = {str(n.id) for n in nodes}
-        if self._selected_target_node_id not in valid_ids:
+    def _validate_selected_target(self) -> None:
+        target_id = self._selected_target_node_id
+        if not target_id:
+            return
+        if self._current_node is not None and target_id == str(self._current_node.id):
+            self._selected_target_node_id = None
+            return
+        try:
+            self._session.get_node(target_id)
+        except KeyError:
             self._selected_target_node_id = None
 
+    def _refresh_combos(self) -> None:
+        self._predicate_combo.clear()
+        self._ensure_predicate_combo_populated()
+        self._validate_selected_target()
         self._refresh_target_display()
         self._refresh_action_buttons()
 
@@ -395,11 +419,14 @@ class QKnowledgeConnectionsPanel(QWidget):
                 return
 
         try:
-            link = self._link_bridge.create_ad_hoc_link(
+            link, result = self._link_bridge.create_ad_hoc_link(
                 link_type_id=link_type_id,
                 source_node_id=str(self._current_node.id),
                 target_node_id=target_node_id,
             )
+            if result is not None:
+                self._session.absorb_io_operation_result(
+                    result, change_type="link", origin="connections_panel_add")
         except ValueError as e:
             # Link type may have been deleted or become invalid; refresh combos
             self._refresh_combos()
@@ -407,7 +434,6 @@ class QKnowledgeConnectionsPanel(QWidget):
             print(f"Failed to create link: {e}", file=sys.stderr)
             return
 
-        self._session.notify_io_mutation("link")
         self._refresh_list()
 
     def _on_pick_target_clicked(self) -> None:
@@ -436,8 +462,10 @@ class QKnowledgeConnectionsPanel(QWidget):
         if not isinstance(link_id, str) or not link_id:
             return
         try:
-            self._link_bridge.delete_link(link_id)
-            self._session.notify_io_mutation("link")
+            result = self._link_bridge.delete_link(link_id)
+            if result is not None:
+                self._session.absorb_io_operation_result(
+                    result, change_type="link", origin="connections_panel_remove")
             self._refresh_list()
         except KeyError:
             pass

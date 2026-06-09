@@ -69,12 +69,12 @@ class QProfileHierarchyWidget(QWidget):
         if sample is None:
             return
         total_ms = max(sample.call_tree.total_ms_value, 1e-6)
-        root_item = self._build_item(
+        root_object = self._build_item(
             sample.call_tree, total_ms=total_ms, is_root=True)
-        self._tree.addTopLevelItem(root_item)
-        root_item.setExpanded(True)
-        for idx in range(root_item.childCount()):
-            root_item.child(idx).setExpanded(True)
+        self._tree.addTopLevelItem(root_object)
+        root_object.setExpanded(True)
+        for idx in range(root_object.childCount()):
+            root_object.child(idx).setExpanded(True)
 
     def select_first_by_name(self, node_name: str) -> bool:
         """Select and reveal the first item with an exact node-name match."""

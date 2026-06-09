@@ -29,6 +29,16 @@ from lks_utils.git._git_service.stage import (
     unstage_all as _unstage_all,
     unstage_paths as _unstage_paths,
 )
+from lks_utils.git._git_service.stash import (
+    StashInfo,
+    autosave_prune as _autosave_prune,
+    autosave_tree_oid_for_index as _autosave_tree_oid_for_index,
+    list_stashes as _list_stashes,
+    stash_apply as _stash_apply,
+    stash_drop as _stash_drop,
+    stash_pop as _stash_pop,
+    stash_save as _stash_save,
+)
 from lks_utils.git._git_service.status import (
     empty_git_status,
     open_repository,
@@ -230,6 +240,58 @@ class KnowledgeGitService(QObject):
         """Generate commit message heuristic from current status groups."""
         current = status if status is not None else self.status()
         return _auto_message(current)
+
+    # ------------------------------------------------------------------
+    # Stash (autosave)
+    # ------------------------------------------------------------------
+
+    def stash_save(
+        self,
+        message: str,
+        *,
+        include_untracked: bool = True,
+        last_tree_oid: str | None = None,
+    ) -> str | None:
+        """Create an autosave commit without touching the working tree.
+
+        Stages all changes, writes a tree, creates a commit on
+        ``refs/lks-autosave/<N>``, then restores the original index.
+        When *last_tree_oid* is provided and the new tree is identical,
+        the call is a no-op.
+
+        Returns:
+            Commit OID hex string, or ``None`` if there are no changes.
+        """
+        return _stash_save(
+            self._repo,
+            message,
+            include_untracked=include_untracked,
+            last_tree_oid=last_tree_oid,
+        )
+
+    def stash_apply(self, index: int) -> bool:
+        """Apply one stash by zero-based index (0 = newest)."""
+        return _stash_apply(self._repo, index)
+
+    def stash_pop(self, index: int) -> bool:
+        """Apply a stash, then drop it from the reflog."""
+        return _stash_pop(self._repo, index)
+
+    def stash_drop(self, index: int) -> bool:
+        """Drop one stash by index from the reflog."""
+        return _stash_drop(self._repo, index)
+
+    def list_stashes(self) -> list[StashInfo]:
+        """Return all autosave entries, newest first."""
+        return _list_stashes(self._repo)
+
+    def autosave_prune(self, max_keep: int) -> None:
+        """Drop the oldest autosave refs so at most *max_keep* remain."""
+        _autosave_prune(self._repo, max_keep)
+
+    def autosave_tree_oid_for_index(self, index: int) -> str | None:
+        """Return the tree OID hex for autosave *index*, or ``None``."""
+        return _autosave_tree_oid_for_index(self._repo, index)
 
     def revert_to_commit(self, sha: str) -> None:
         """Revert repository to a previous commit hash."""

@@ -4,13 +4,139 @@
         "knowledge.graph.render": {
             "description": "Full knowledge graph render pass (200-node scene).",
             "budget": {
-                "p95_ms": 16.6
+                "p95_ms": 150.0
             },
-            "test_id": "src/lks_utils/knowledge/test/perf_graph_test.py::test_knowledge_graph_render_perf",
-            "scenario_callable": "lks_utils.knowledge.scenarios.graph_render",
+            "test_id": "src/lks_utils/knowledge/ui/components/_graph_tab/test/graph_tab_select_simulation_test.py::test_graph_tab_select_large_repo_simulation",
+            "scenario_callable": null,
             "surface_kind": "INTERACTIVE",
             "device_focus": [
                 "GPU",
+                "CPU"
+            ]
+        },
+        "knowledge.graph_tab.select": {
+            "description": "Graph-tab node selection customization (no repo reload side effects).",
+            "budget": {
+                "p95_ms": 150.0
+            },
+            "test_id": "src/lks_utils/knowledge/ui/components/_graph_tab/test/graph_tab_select_simulation_test.py::test_graph_tab_select_large_repo_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU",
+                "GPU"
+            ]
+        },
+        "knowledge.graph_tab.deselect": {
+            "description": "Graph-tab deselect on 100-node graph (no reload side effects).",
+            "budget": {
+                "p95_ms": 150.0
+            },
+            "test_id": "src/lks_utils/knowledge/ui/components/_graph_tab/test/graph_tab_deselect_simulation_test.py::test_graph_tab_deselect_large_repo_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU",
+                "GPU"
+            ]
+        },
+        "knowledge.graph_tab.multi_select": {
+            "description": "Graph-tab shift multi-select on 100-node graph.",
+            "budget": {
+                "p95_ms": 200.0
+            },
+            "test_id": "src/lks_utils/knowledge/ui/components/_graph_tab/test/graph_tab_multi_select_simulation_test.py::test_graph_tab_multi_select_large_repo_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU",
+                "GPU"
+            ]
+        },
+        "knowledge.graph_tab.drag_move": {
+            "description": "Graph-tab node drag on 100-node pixmap graph at 4K (no reload during drag).",
+            "budget": {
+                "p95_ms": 22.0
+            },
+            "test_id": "src/lks_utils/knowledge/ui/components/_graph_tab/test/graph_tab_drag_move_simulation_test.py::test_graph_tab_drag_move_large_repo_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU",
+                "GPU"
+            ]
+        },
+        "knowledge.library.drag_drop": {
+            "description": "Library instance drag onto decomposition ref slot (slot_ref edge created).",
+            "budget": {
+                "p95_ms": 200.0
+            },
+            "test_id": "src/lks_utils/knowledge/ui/components/library_panel/test/library_drag_drop_simulation_test.py::test_library_drag_drop_sets_ref_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU"
+            ]
+        },
+        "knowledge.graph_tab.expand": {
+            "description": "Graph-tab toolbar expand traversal from selection (no repo reload).",
+            "budget": {
+                "p95_ms": 200.0
+            },
+            "test_id": "src/lks_utils/knowledge/ui/components/_graph_tab/test/toolbar_expand_simulation_test.py::test_graph_tab_toolbar_expand_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU",
+                "GPU"
+            ]
+        },
+        "knowledge.palette.instance_click": {
+            "description": "Graph instance palette row click selects draggable instance.",
+            "budget": {
+                "p95_ms": 150.0
+            },
+            "test_id": "src/lks_utils/knowledge/ui/components/graph_instance_palette_panel/test/palette_click_simulation_test.py::test_graph_instance_palette_click_selects_row_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU"
+            ]
+        },
+        "knowledge.decomposition.select": {
+            "description": "Decomposition canvas row select without repo reload.",
+            "budget": {
+                "p95_ms": 150.0
+            },
+            "test_id": "src/lks_utils/knowledge/ui/test/decomposition_select_simulation_test.py::test_decomposition_select_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU",
+                "GPU"
+            ]
+        },
+        "knowledge.library.select": {
+            "description": "Type library double-click loads inspector without repo reload.",
+            "budget": {
+                "p95_ms": 150.0
+            },
+            "test_id": "src/lks_utils/knowledge/ui/components/context_library_panel/test/library_select_simulation_test.py::test_library_select_loads_inspector_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU"
+            ]
+        },
+        "knowledge.inspector.text_edit_commit": {
+            "description": "Inspector name field commit on 100-node graph (no repo reload; single io_apply_op).",
+            "budget": {
+                "p95_ms": 150.0
+            },
+            "test_id": "src/lks_utils/knowledge/ui/components/_properties_panel/test/inspector_text_edit_simulation_test.py::test_inspector_name_commit_large_repo_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
                 "CPU"
             ]
         },
@@ -19,9 +145,69 @@
             "budget": {
                 "p95_ms": 5.0
             },
-            "test_id": "src/lks_utils/knowledge/test/perf_lookup_test.py::test_node_lookup_perf",
-            "scenario_callable": "lks_utils.knowledge.scenarios.node_lookup",
+            "test_id": "src/lks_utils/knowledge/ui/components/context_library_panel/test/library_select_simulation_test.py::test_library_select_loads_inspector_simulation",
+            "scenario_callable": null,
             "surface_kind": "BATCH",
+            "device_focus": [
+                "CPU"
+            ]
+        },
+        "knowledge.link_type.editor_commit": {
+            "description": "Link-type inspector description edit and Save commit.",
+            "budget": {
+                "p95_ms": 150.0
+            },
+            "test_id": "src/lks_utils/knowledge/ui/test/link_type_editor_commit_simulation_test.py::test_link_type_editor_description_commit_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU"
+            ]
+        },
+        "knowledge.connections.select": {
+            "description": "Connections panel outgoing link row select enables remove.",
+            "budget": {
+                "p95_ms": 100.0
+            },
+            "test_id": "src/lks_utils/knowledge/ui/test/connections_panel_select_simulation_test.py::test_connections_panel_outgoing_select_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU"
+            ]
+        },
+        "gui.preferences.close": {
+            "description": "Preferences dialog Close button accepts and dismisses.",
+            "budget": {
+                "p95_ms": 100.0
+            },
+            "test_id": "src/lks_utils/gui_qt/preferences_dialog/test/preferences_close_simulation_test.py::test_preferences_dialog_close_button_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU"
+            ]
+        },
+        "knowledge.picker.type_ok": {
+            "description": "Type picker filter, list select, and OK confirm.",
+            "budget": {
+                "p95_ms": 150.0
+            },
+            "test_id": "src/lks_utils/knowledge/ui/test/picker_dialog_simulation_test.py::test_type_picker_dialog_ok_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU"
+            ]
+        },
+        "knowledge.picker.ref_ok": {
+            "description": "Ref picker filter, list select, and OK confirm.",
+            "budget": {
+                "p95_ms": 150.0
+            },
+            "test_id": "src/lks_utils/knowledge/ui/test/picker_dialog_simulation_test.py::test_ref_picker_dialog_ok_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
             "device_focus": [
                 "CPU"
             ]

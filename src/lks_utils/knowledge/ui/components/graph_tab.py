@@ -4,7 +4,7 @@ from lks_utils.knowledge.ui.components._graph_tab.link_router import install_lin
 from lks_utils.knowledge.ui.components._graph_tab.layout_engine import install_layout_engine_helpers
 from lks_utils.knowledge.ui.components._graph_tab.hit_test import install_hit_test_helpers
 from lks_utils.knowledge.ui.components._graph_tab.drag_controller import install_drag_controller_helpers
-from lks_utils.knowledge.ui.components._graph_tab.canvas_item_factory import install_canvas_item_factory_helpers
+from lks_utils.knowledge.ui.components._graph_tab.canvas_object_factory import install_canvas_object_factory_helpers
 
 import dataclasses
 import logging
@@ -48,6 +48,7 @@ from lks_utils.knowledge.default_theme import (
     VALIDATION_ERROR_TEXT,
 )
 from lks_utils.knowledge.editor_session import EditorSession
+from lks_utils.knowledge.ui.live_reload_coordinator import LiveReloadCoordinator
 from lks_utils.knowledge.link_type_view_state import LinkTypeViewState
 from lks_utils.knowledge.links.link_instance import LinkInstance
 from lks_utils.knowledge.links.link_type import SLOT_REF_LINK_TYPE_ID, LinkType
@@ -92,7 +93,7 @@ from lks_utils.knowledge.ui.widgets.graph_canvas import (
     QKnowledgeGraphCanvasWidget,
     estimate_graph_node_size_for_proxy,
 )
-from lks_utils.knowledge.ui.widgets.graph_node_canvas_item import QKnowledgeGraphNodeCanvasItem
+from lks_utils.knowledge.ui.widgets.graph_node_canvas_object import QKnowledgeGraphNodeCanvasObject
 from lks_utils.knowledge.ui.widgets.validation_log import QKnowledgeValidationLogWidget
 from lks_utils.gui_qt.base.async_task_runner import WorkerThread
 
@@ -161,7 +162,7 @@ class QKnowledgeGraphTabWidget(QKnowledgeEditorTabBase):
         self._canvas.instance_dropped.connect(self._on_instance_dropped)
         self._canvas.instances_dropped.connect(self._on_instances_dropped)
         self._canvas.type_dropped.connect(self._on_type_dropped)
-        self._canvas.items_moved.connect(self._on_canvas_items_moved)
+        self._canvas.objects_moved.connect(self._on_canvas_objects_moved)
         self._canvas.clear_selection_requested.connect(
             self._on_clear_selected_proxies)
         self._canvas.delete_selection_requested.connect(
@@ -171,6 +172,8 @@ class QKnowledgeGraphTabWidget(QKnowledgeEditorTabBase):
         self._canvas.selection_model_changed.connect(
             self._on_canvas_selection_model_changed)
         self._canvas.node_selected.connect(self._on_canvas_node_selected)
+        self._canvas.pointer_gesture_finished.connect(
+            self._on_canvas_pointer_gesture_finished)
         self._canvas.link_selected.connect(self._on_canvas_link_selected)
         self._canvas.link_source_drag_started.connect(
             self._on_link_source_drag_started)
@@ -205,6 +208,8 @@ class QKnowledgeGraphTabWidget(QKnowledgeEditorTabBase):
         self._selected_canvas_ids: set[str] = set()
         self._active_canvas_id: str | None = None
         self._pending_targeted_node_refresh_ids: set[str] | None = None
+        self._pending_selection_side_panel_node_id: str | None = None
+        self._selection_side_panel_flush_scheduled: bool = False
         self._link_type_view_state = LinkTypeViewState()
         self._traversal_direction: Literal["forward", "back", "both"] = "both"
         self._repo_watcher = QFileSystemWatcher(self)
@@ -241,6 +246,10 @@ class QKnowledgeGraphTabWidget(QKnowledgeEditorTabBase):
         self._viewport_sidecar_write_timer.timeout.connect(
             self._flush_canvas_viewport_sidecar_write)
         self._load_live_reload_settings()
+        self._live_reload_coordinator = LiveReloadCoordinator(self._session)
+        self._live_reload_coordinator.journal_offset = (
+            self._external_event_journal_offset
+        )
         self._perf_button: QPushButton | None = None
         self._perf_window: QKnowledgeGraphPerfWindow | None = None
 
@@ -398,7 +407,7 @@ class QKnowledgeGraphTabWidget(QKnowledgeEditorTabBase):
 install_layout_engine_helpers(QKnowledgeGraphTabWidget)
 install_hit_test_helpers(QKnowledgeGraphTabWidget)
 install_link_router_helpers(QKnowledgeGraphTabWidget)
-install_canvas_item_factory_helpers(QKnowledgeGraphTabWidget)
+install_canvas_object_factory_helpers(QKnowledgeGraphTabWidget)
 install_drag_controller_helpers(QKnowledgeGraphTabWidget)
 
 __all__ = ["QKnowledgeGraphTabWidget"]

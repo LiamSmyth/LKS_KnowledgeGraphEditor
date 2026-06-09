@@ -313,7 +313,7 @@ class QKnowledgeContextLibraryPanel(QWidget):
         if not isinstance(view_id, str):
             return None
         try:
-            return CanvasIO.load_graph_view(self._session._io, view_id)  # noqa: SLF001
+            return self._session.load_graph_view(view_id)
         except KeyError:
             return None
 
@@ -371,7 +371,7 @@ class QKnowledgeContextLibraryPanel(QWidget):
             self._links = []
             try:
                 self._graph_views = sorted(
-                    CanvasIO.list_graph_views(self._session._io),  # noqa: SLF001
+                    self._session.list_graph_views(),
                     key=lambda gv: gv.name.lower(),
                 )
             except ValueError:
@@ -1180,7 +1180,7 @@ class QKnowledgeContextLibraryPanel(QWidget):
                 return
             new_name = new_name.strip()
             updated = link_type.model_copy(update={"name": new_name})
-            result = self._session._io.upsert_link_type(updated)  # noqa: SLF001
+            result = self._session.io_upsert_link_type(updated)
             if not result.ok:
                 QMessageBox.warning(
                     self,
@@ -1188,7 +1188,6 @@ class QKnowledgeContextLibraryPanel(QWidget):
                     result.error_message or "Unable to rename link type.",
                 )
                 return
-            self._session.notify_io_mutation("link_type")
             self.node_renamed.emit(str(link_type.id), new_name)
             return
 
@@ -1205,8 +1204,7 @@ class QKnowledgeContextLibraryPanel(QWidget):
             if not ok or not new_name.strip() or new_name.strip() == graph_view.name:
                 return
             new_name = new_name.strip()
-            unique_name = CanvasIO.ensure_unique_graph_view_name(  # noqa: SLF001
-                self._session._io,
+            unique_name = self._session.ensure_unique_graph_view_name(
                 new_name,
                 exclude_id=str(graph_view.id),
             )
@@ -1219,7 +1217,7 @@ class QKnowledgeContextLibraryPanel(QWidget):
             new_name = unique_name
             updated = replace(graph_view, name=new_name)
             try:
-                CanvasIO.save_graph_view(self._session._io, updated)  # noqa: SLF001
+                self._session.save_graph_view(updated)
                 self._session.notify_repository_mutated("graph_view")
             except ValueError:
                 return
@@ -1240,7 +1238,7 @@ class QKnowledgeContextLibraryPanel(QWidget):
         new_name = new_name.strip()
         updated = node.model_copy(
             update={"name": new_name, "rev": node.rev + 1})
-        result = self._session._io.upsert_node(updated)  # noqa: SLF001
+        result = self._session.io_upsert_node(updated)
         if not result.ok:
             QMessageBox.warning(
                 self,
@@ -1248,7 +1246,6 @@ class QKnowledgeContextLibraryPanel(QWidget):
                 result.error_message or "Unable to rename node.",
             )
             return
-        self._session.notify_io_mutation("node")
         self.node_renamed.emit(str(node.id), new_name)
 
     def _on_delete(self) -> None:
@@ -1266,7 +1263,7 @@ class QKnowledgeContextLibraryPanel(QWidget):
             impact = _analyze_link_type_delete_impact(
                 self._session, [str(link_type.id)])
             if impact.is_safe:
-                result = self._session._io.delete_link_type_cascade(  # noqa: SLF001
+                result = self._session.io_delete_link_type_cascade(
                     str(link_type.id)
                 )
                 if not result.ok:
@@ -1276,7 +1273,6 @@ class QKnowledgeContextLibraryPanel(QWidget):
                         result.error_message or "Unable to delete link type.",
                     )
                     return
-                self._session.notify_io_mutation("link_type")
                 self.node_deleted.emit(str(link_type.id))
                 return
             delete_dialog = QKnowledgeRefAwareDeleteDialog(
@@ -1304,7 +1300,7 @@ class QKnowledgeContextLibraryPanel(QWidget):
             )
             if reply == QMessageBox.StandardButton.Yes:
                 try:
-                    CanvasIO.delete_graph_view(self._session._io, str(graph_view.id))  # noqa: SLF001
+                    self._session.delete_graph_view(str(graph_view.id))
                     self._session.notify_repository_mutated("graph_view")
                 except ValueError:
                     return
@@ -1324,7 +1320,7 @@ class QKnowledgeContextLibraryPanel(QWidget):
             if reply != QMessageBox.StandardButton.Yes:
                 return
             for link_id in selected_ids:
-                result = self._session._io.remove_link(link_id)  # noqa: SLF001
+                result = self._session.io_remove_link(link_id)
                 if not result.ok:
                     QMessageBox.warning(
                         self,
@@ -1332,7 +1328,6 @@ class QKnowledgeContextLibraryPanel(QWidget):
                         result.error_message or f"Unable to delete link: {link_id}",
                     )
                     return
-            self._session.notify_io_mutation("link")
             for link_id in selected_ids:
                 self.node_deleted.emit(link_id)
             return
@@ -1340,7 +1335,7 @@ class QKnowledgeContextLibraryPanel(QWidget):
         node = self.selected_node()
         if node is None:
             return
-        impact = self._session._io.preview_delete_nodes([str(node.id)])  # noqa: SLF001
+        impact = self._session.preview_delete_nodes([str(node.id)])
         if impact.is_safe:
             delete_dialog = QKnowledgeRefAwareDeleteDialog(
                 impact, self._session, parent=self

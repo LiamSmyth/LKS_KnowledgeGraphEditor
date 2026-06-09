@@ -11,6 +11,7 @@ from lks_utils.gui_qt.widgets.node_header_ribbon_widget import QNodeHeaderRibbon
 from lks_utils.knowledge.default_theme import (
     NODE_FILL_COLOR,
     NODE_HEADER_BG,
+    NODE_HEADER_SEP,
     NODE_SELECTED_STROKE_COLOR,
     NODE_STROKE_COLOR,
     NODE_SUBTITLE_TEXT,
@@ -42,9 +43,10 @@ class _QClipboardTooltipLabel(QLabel):
 class QKnowledgeGraphNodeWidget(QFrame):
     """Canvas-blind graph node widget used by pixmap-backed adapters."""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, *, body_only: bool = False) -> None:
         super().__init__(parent)
         self._clear_enabled = False
+        self._body_only = bool(body_only)
 
         self.setObjectName("knowledge-graph-node")
 
@@ -73,7 +75,8 @@ class QKnowledgeGraphNodeWidget(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._header)
+        if not self._body_only:
+            layout.addWidget(self._header)
         layout.addWidget(self._properties, stretch=1)
 
         self._apply_style(QColor(NODE_HEADER_BG))
@@ -165,7 +168,23 @@ class QKnowledgeGraphNodeWidget(QFrame):
         fill = QColor(NODE_FILL_COLOR)
         text = QColor(NODE_TEXT_COLOR)
         subtitle = QColor(NODE_SUBTITLE_TEXT)
-        self._header.set_ribbon_background(header_bg)
+        if not self._body_only:
+            self._header.set_ribbon_style(
+                background=header_bg,
+                separator=QColor(NODE_HEADER_SEP),
+            )
+        if self._body_only:
+            self.setStyleSheet(
+                "#knowledge-graph-node {"
+                "background: transparent;"
+                "border: none;"
+                "}"
+                "#knowledge-graph-node QLabel {"
+                f"color: {text.name()};"
+                "font-size: 11px;"
+                "}"
+            )
+            return
         self.setStyleSheet(
             "#knowledge-graph-node {"
             f"background: {fill.name()};"

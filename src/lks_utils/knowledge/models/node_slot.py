@@ -239,7 +239,6 @@ def type_default_value(value_type: str) -> object:
     # Extended types (not in PropertyTypeRegistry) - compatibility fallback.
     scalar_fallbacks: dict[str, object] = {
         "string": "",
-        "str": "",
         "json": "",
         "bytes": "",
         "int": 0,

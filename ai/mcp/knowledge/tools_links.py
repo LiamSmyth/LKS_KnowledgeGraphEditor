@@ -485,6 +485,62 @@ def upsert_link_type_impl(path: str, link_type: dict[str, Any]) -> dict[str, Any
     }
 
 
+def ensure_link_via_io(
+    io: Any,
+    *,
+    source_node_id: str | None = None,
+    source_node_name: str | None = None,
+    target_node_id: str | None = None,
+    target_node_name: str | None = None,
+    link_type_id: str | None = None,
+    link_type_name: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Shared ensure-link implementation for MCP tools and canvas composites."""
+    source_node = io.resolve_node_identity(
+        node_id=source_node_id, node_name=source_node_name)
+    target_node = io.resolve_node_identity(
+        node_id=target_node_id, node_name=target_node_name)
+    link_type = io.resolve_link_type_identity(
+        link_type_id=link_type_id,
+        link_type_name=link_type_name,
+    )
+    desired_metadata = metadata or {}
+
+    for existing in io.list_links():
+        if (
+            existing.link_type_id == link_type.id
+            and existing.source_node_id == str(source_node.id)
+            and existing.target_node_id == str(target_node.id)
+            and existing.metadata == desired_metadata
+        ):
+            return {
+                "status": "ok",
+                "touched_ids": [],
+                "validated_ids": [],
+                "issues": [],
+                "error_message": None,
+                "save_error": None,
+                "created": False,
+                "link": existing.model_dump(),
+            }
+
+    payload = {
+        "link_type_id": link_type.id,
+        "source_node_id": str(source_node.id),
+        "target_node_id": str(target_node.id),
+        "metadata": desired_metadata,
+    }
+    validated = LinkInstance.model_validate(payload)
+    result = io.upsert_link(validated)
+    persisted = io.find_link(validated.id)
+    return {
+        **result_envelope(result),
+        "created": True,
+        "link": persisted.model_dump() if persisted is not None else None,
+    }
+
+
 def register_link_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     def list_link_types(path: str, include_system: bool = True) -> list[dict[str, Any]]:
@@ -618,48 +674,16 @@ def register_link_tools(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """[MUTATES] Ensure a link exists by semantic tuple, resolving names to IDs."""
         io = _build_io(path)
-        source_node = io.resolve_node_identity(
-            node_id=source_node_id, node_name=source_node_name)
-        target_node = io.resolve_node_identity(
-            node_id=target_node_id, node_name=target_node_name)
-        link_type = io.resolve_link_type_identity(
+        return ensure_link_via_io(
+            io,
+            source_node_id=source_node_id,
+            source_node_name=source_node_name,
+            target_node_id=target_node_id,
+            target_node_name=target_node_name,
             link_type_id=link_type_id,
             link_type_name=link_type_name,
+            metadata=metadata,
         )
-        desired_metadata = metadata or {}
-
-        for existing in io.list_links():
-            if (
-                existing.link_type_id == link_type.id
-                and existing.source_node_id == str(source_node.id)
-                and existing.target_node_id == str(target_node.id)
-                and existing.metadata == desired_metadata
-            ):
-                return {
-                    "status": "ok",
-                    "touched_ids": [],
-                    "validated_ids": [],
-                    "issues": [],
-                    "error_message": None,
-                    "save_error": None,
-                    "created": False,
-                    "link": existing.model_dump(),
-                }
-
-        payload = {
-            "link_type_id": link_type.id,
-            "source_node_id": str(source_node.id),
-            "target_node_id": str(target_node.id),
-            "metadata": desired_metadata,
-        }
-        validated = LinkInstance.model_validate(payload)
-        result = io.upsert_link(validated)
-        persisted = io.find_link(validated.id)
-        return {
-            **result_envelope(result),
-            "created": True,
-            "link": persisted.model_dump() if persisted is not None else None,
-        }
 
     @mcp.tool()
     def delete_link(path: str, link_id: str) -> dict[str, Any]:

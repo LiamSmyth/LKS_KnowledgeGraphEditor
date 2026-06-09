@@ -343,7 +343,7 @@ class QKnowledgeLinkTypesTabWidget(QKnowledgeEditorTabBase):
             self.open_link_type(str(link_type.id))
             return
 
-        result = self._session._io.upsert_link_type(link_type)  # noqa: SLF001
+        result = self._session.io_upsert_link_type(link_type)
         if not result.ok:
             QMessageBox.warning(
                 self,
@@ -351,7 +351,6 @@ class QKnowledgeLinkTypesTabWidget(QKnowledgeEditorTabBase):
                 result.error_message or "Unable to save link type.",
             )
             return
-        self._session.notify_io_mutation("link_type")
         self._current_link_type_id = str(link_type.id)
         self._editing_link_type = link_type
         self.open_link_type(str(link_type.id))
@@ -423,7 +422,7 @@ class QKnowledgeLinkTypesTabWidget(QKnowledgeEditorTabBase):
 
         self._autosave_in_progress = True
         try:
-            result = self._session._io.upsert_link_type(candidate)  # noqa: SLF001
+            result = self._session.io_upsert_link_type(candidate)
             if not result.ok:
                 self._inspector.set_status_message(
                     result.error_message or "Unable to save link type."
@@ -431,7 +430,6 @@ class QKnowledgeLinkTypesTabWidget(QKnowledgeEditorTabBase):
                 return
 
             self._inspector.set_status_message("")
-            self._session.notify_io_mutation("link_type")
             self._current_link_type_id = str(candidate.id)
             self._editing_link_type = candidate
             self.open_link_type(str(candidate.id))

@@ -7,7 +7,7 @@ from PySide6.QtCore import QPointF, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QLabel, QMessageBox, QVBoxLayout, QWidget
 
-from lks_utils.gui_qt.canvas2d.canvas_item import CanvasItem
+from lks_utils.gui_qt.canvas2d.canvas_object import CanvasObject
 from lks_utils.knowledge.ui.widgets.validation_log import (
     QKnowledgeValidationLogWidget,
     ValidationErrorEntry,
@@ -48,10 +48,10 @@ from lks_utils.knowledge.ui.components.decomposition_layout_constants import (
     VERT_GAP as _VERT_GAP,
 )
 from lks_utils.knowledge.ui.components.decomposition_layout_helpers import card_height as _card_height
-from lks_utils.knowledge.ui.widgets.field_node_canvas_item import QKnowledgeFieldNodeCanvasItem
+from lks_utils.knowledge.ui.widgets.field_node_canvas_object import QKnowledgeFieldNodeCanvasObject
 from lks_utils.knowledge.ui.widgets.knowledge_decomposition_canvas import _KnowledgeDecompositionCanvas
-from lks_utils.knowledge.ui.widgets.knowledge_edge_canvas_item import _KnowledgeEdgeCanvasItem
-from lks_utils.knowledge.ui.widgets.port_stub_item import QKnowledgePortStubCanvasItem
+from lks_utils.knowledge.ui.widgets.knowledge_edge_canvas_object import _KnowledgeEdgeCanvasObject
+from lks_utils.knowledge.ui.widgets.port_stub_item import QKnowledgePortStubCanvasObject
 from lks_utils.knowledge.ui.components.field_row_factory import (
     FieldRow,
     FieldRowInheritance,
@@ -79,8 +79,8 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
                                               dict[str, dict[str, bool]]] = {}
         self._collapse_state_capture_node_id: str | None = None
 
-        self._canvas_items: list[CanvasItem] = []
-        self._field_items: list[QKnowledgeFieldNodeCanvasItem] = []
+        self._canvas_objects: list[CanvasObject] = []
+        self._field_items: list[QKnowledgeFieldNodeCanvasObject] = []
 
         self._canvas = _KnowledgeDecompositionCanvas(
             self, MIME_KNOWLEDGE_PALETTE_COMPONENT, self)
@@ -102,7 +102,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
         Always bind to the current IO repository snapshot to avoid stale repository
         references after session reload/swap operations.
         """
-        return Mutator(self._session._io.repository)  # noqa: SLF001
+        return Mutator(self._session.repository)  # noqa: SLF001
 
     @staticmethod
     def _slot_ref_link_ids_for_node(repo: Repository, node_id: str) -> set[str]:
@@ -152,7 +152,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
         """Return display payload for a slot, preferring slot_ref link assets."""
         if slot.source.is_reference:
             target_ids = self._slot_ref_target_ids_for_slot(
-                self._session._io.repository,  # noqa: SLF001
+                self._session.repository,  # noqa: SLF001
                 str(node.id),
                 slot.name,
             )
@@ -177,11 +177,10 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
             after_link_ids = self._slot_ref_link_ids_for_node(repo, node_id)
             return {node_id, *before_link_ids, *after_link_ids}
 
-        result = self._session._io.apply_op(_mutate)  # noqa: SLF001
+        result = self._session.io_apply_op(_mutate)
         if not result.ok:
             raise ValueError(
                 result.error_message or f"Failed to apply mutation: {label}")
-        self._session.notify_io_mutation("node")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._session.remove_change_listener(self._on_session_change)
@@ -292,7 +291,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
         for item in self._field_items:
             if getattr(item, "_selection_slot_name", None) == slot_name:
                 # Select the item visually on the canvas
-                self._canvas.select_item(item)
+                self._canvas.select_object(item)
                 # Manually emit row_selected signal since programmatic selection
                 # doesn't trigger the mouse event that would normally emit it
                 self.row_selected.emit(slot_name)
@@ -304,11 +303,11 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
         For instance nodes the canvas schema is immutable — this method returns
         False without mutating anything, preventing Delete-key structural changes.
         """
-        selected_items = [
-            item for item in self._canvas.selected_items()
-            if isinstance(item, QKnowledgeFieldNodeCanvasItem)
+        selected_objects = [
+            item for item in self._canvas.selected_objects()
+            if isinstance(item, QKnowledgeFieldNodeCanvasObject)
         ]
-        if not selected_items:
+        if not selected_objects:
             return False
         if self._current_node_id is None:
             self._canvas.clear_selection()
@@ -324,14 +323,14 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
             return False
 
         handled = False
-        for item in selected_items:
+        for item in selected_objects:
             if getattr(item, "_is_root", False):
                 continue
             slot_name = getattr(item, "_selection_slot_name", None)
             if not isinstance(slot_name, str) or not slot_name:
                 continue
             try:
-                result = self._session._io.remove_slot_from_type(  # noqa: SLF001
+                result = self._session.io_remove_slot_from_type(
                     self._current_node_id, slot_name)
                 if not result.ok:
                     continue
@@ -341,7 +340,6 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
 
         self._canvas.clear_selection()
         if handled:
-            self._session.notify_io_mutation("node")
             self._refresh_current_node()
         return True
 
@@ -376,16 +374,16 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
     def _clear_canvas(self) -> None:
         self._remember_collapse_state(self._collapse_state_capture_node_id)
         self._collapse_state_capture_node_id = None
-        for item in self._canvas_items:
-            self._canvas.remove_item(item)
-        self._canvas_items = []
+        for item in self._canvas_objects:
+            self._canvas.remove_object(item)
+        self._canvas_objects = []
         self._field_items = []
         self._current_slots_by_name = {}
 
-    def _add_item(self, item: CanvasItem) -> None:
-        self._canvas.add_item(item)
-        self._canvas_items.append(item)
-        if isinstance(item, QKnowledgeFieldNodeCanvasItem):
+    def _add_object(self, item: CanvasObject) -> None:
+        self._canvas.add_object(item)
+        self._canvas_objects.append(item)
+        if isinstance(item, QKnowledgeFieldNodeCanvasObject):
             self._field_items.append(item)
             self._restore_item_collapse_state(item)
 
@@ -401,7 +399,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
         if state:
             self._collapse_state_by_node_id[target_node_id] = state
 
-    def _restore_item_collapse_state(self, item: QKnowledgeFieldNodeCanvasItem) -> None:
+    def _restore_item_collapse_state(self, item: QKnowledgeFieldNodeCanvasObject) -> None:
         if self._current_node_id is None:
             return
         state = self._collapse_state_by_node_id.get(
@@ -431,10 +429,10 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
 
     def _sync_selection_visuals(self) -> None:
         selected = {
-            item for item in self._canvas.selected_items()
-            if isinstance(item, QKnowledgeFieldNodeCanvasItem)
+            item for item in self._canvas.selected_objects()
+            if isinstance(item, QKnowledgeFieldNodeCanvasObject)
         }
-        active = self._canvas.active_selected_item()
+        active = self._canvas.active_selected_object()
         for item in self._field_items:
             item.selected = item in selected
             item.active_selected = item is active
@@ -454,7 +452,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
                      "description", node.description or "(none)", []),
         ]
         root_h = _card_height(root_rows)
-        root_item = QKnowledgeFieldNodeCanvasItem(
+        root_object = QKnowledgeFieldNodeCanvasObject(
             node_id=str(node.id),
             node_name=f"{node.name}  (_type)",
             x=_ROOT_X0,
@@ -467,9 +465,9 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
             on_select=self._on_item_selected,
             header_bg_color=effective_node_display_color(node),
         )
-        self._add_item(root_item)
-        root_item.set_validation_errors(self._validation_errors_dict(node))
-        self._add_ad_hoc_port_stubs(node, root_item)
+        self._add_object(root_object)
+        root_object.set_validation_errors(self._validation_errors_dict(node))
+        self._add_ad_hoc_port_stubs(node, root_object)
 
         if not slots:
             return
@@ -515,7 +513,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
             ]
             child_h = _card_height(child_rows)
             child_y0 = child_y1 - child_h
-            child_item = QKnowledgeFieldNodeCanvasItem(
+            child_item = QKnowledgeFieldNodeCanvasObject(
                 node_id=f"{node.id}:slot:{slot.name}",
                 node_name=slot.name,
                 x=child_x,
@@ -529,9 +527,9 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
                 header_bg_color=self._header_color_for_slot(slot),
                 header_subtitle=mode,
             )
-            self._add_item(child_item)
+            self._add_object(child_item)
             child_cx = child_x + _CHILD_W / 2.0
-            self._add_item(_KnowledgeEdgeCanvasItem(
+            self._add_object(_KnowledgeEdgeCanvasObject(
                 x0=root_cx, y0=_ROOT_Y0, x1=child_cx, y1=child_y1,
                 label=_TYPE_PROPERTY_EDGE_LABEL,
                 arrow_at_end=True,
@@ -622,7 +620,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
         root_y1 = root_y0 + root_h
         root_cx = _ROOT_X0 + root_w / 2.0
 
-        root_item = QKnowledgeFieldNodeCanvasItem(
+        root_object = QKnowledgeFieldNodeCanvasObject(
             node_id=str(node.id),
             node_name=f"{node.name}  ({node.category})",
             x=_ROOT_X0,
@@ -638,9 +636,9 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
             on_select=self._on_item_selected,
             header_bg_color=self._header_color_for_node(node),
         )
-        self._add_item(root_item)
-        root_item.set_validation_errors(self._validation_errors_dict(node))
-        self._add_ad_hoc_port_stubs(node, root_item)
+        self._add_object(root_object)
+        root_object.set_validation_errors(self._validation_errors_dict(node))
+        self._add_ad_hoc_port_stubs(node, root_object)
 
         # ── Type inheritance chain (above root) ────────────────────────────────────────────
         type_chain = self._type_chain_for_instance(node)
@@ -685,7 +683,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
                 t_x = type_x0
                 t_top_y = type_y0 + t_h
 
-                self._add_item(QKnowledgeFieldNodeCanvasItem(
+                self._add_object(QKnowledgeFieldNodeCanvasObject(
                     node_id=str(type_node.id),
                     node_name=f"{type_node.name}  (_type)",
                     x=t_x,
@@ -700,7 +698,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
 
                 # extends edge: parent (above) -> child (below)
                 if prev_child_top_y is not None:
-                    self._add_item(_KnowledgeEdgeCanvasItem(
+                    self._add_object(_KnowledgeEdgeCanvasObject(
                         x0=type_center_x,
                         y0=type_y0,
                         x1=type_center_x,
@@ -715,7 +713,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
 
             # instance_of edge: root card top-center -> direct type (outgoing from root)
             direct_type_bottom_y = root_y1 + _VERT_GAP
-            self._add_item(_KnowledgeEdgeCanvasItem(
+            self._add_object(_KnowledgeEdgeCanvasObject(
                 x0=root_cx,
                 y0=root_y1,
                 x1=type_center_x,
@@ -763,7 +761,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
             )
             child_h = _card_height([child_row])
             child_y0_card = child_y1 - child_h
-            child_item = QKnowledgeFieldNodeCanvasItem(
+            child_item = QKnowledgeFieldNodeCanvasObject(
                 node_id=f"{node.id}:ref:{slot.name}",
                 node_name=slot.name,
                 x=child_x,
@@ -779,9 +777,9 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
                 header_bg_color=self._header_color_for_slot(slot),
                 header_subtitle=slot.ref_type or slot.effective_value_mode().value,
             )
-            self._add_item(child_item)
+            self._add_object(child_item)
             child_cx = child_x + _CHILD_W / 2.0
-            self._add_item(_KnowledgeEdgeCanvasItem(
+            self._add_object(_KnowledgeEdgeCanvasObject(
                 x0=root_cx, y0=root_y0, x1=child_cx, y1=child_y1,
             ))
 
@@ -798,7 +796,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
             required=False,
         )
         try:
-            result = self._session._io.add_slot_to_type(  # noqa: SLF001
+            result = self._session.io_add_slot_to_type(
                 self._current_node_id, slot.model_dump())
             if not result.ok:
                 self._show_op_error(
@@ -807,7 +805,6 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
         except (KeyError, ValueError) as exc:
             self._show_op_error(str(exc))
             return False
-        self._session.notify_io_mutation("node")
         self._refresh_current_node()
         # Auto-select the newly-created slot so inspector immediately shows its settings
         self.select_slot_by_name(slot_name)
@@ -823,7 +820,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
             return f"{prefix}_1"
         try:
             node = self._session.get_node(self._current_node_id)
-            merged_slots = self._session._io.get_type_slots(  # noqa: SLF001
+            merged_slots = self._session.get_type_slots(  # noqa: SLF001
                 self._current_node_id,
             )
         except (KeyError, ValueError):
@@ -838,7 +835,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
 
     # ------ Shared helpers ------------------------------------------
 
-    def _add_ad_hoc_port_stubs(self, node: Node, root_item: QKnowledgeFieldNodeCanvasItem) -> None:
+    def _add_ad_hoc_port_stubs(self, node: Node, root_object: QKnowledgeFieldNodeCanvasObject) -> None:
         node_id = str(node.id)
         node_names_by_id = {
             str(candidate.id): candidate.name for candidate in self._session.list_nodes()
@@ -867,11 +864,11 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
 
         outgoing = [link for link in links if link.source_node_id == node_id]
         incoming = [link for link in links if link.target_node_id == node_id]
-        node_bounds = root_item.bounds()
+        node_bounds = root_object.bounds()
 
         for index, link in enumerate(outgoing):
-            self._add_item(
-                QKnowledgePortStubCanvasItem(
+            self._add_object(
+                QKnowledgePortStubCanvasObject(
                     node_id=node_id,
                     node_bounds=node_bounds,
                     direction="outgoing",
@@ -888,8 +885,8 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
             )
 
         for index, link in enumerate(incoming):
-            self._add_item(
-                QKnowledgePortStubCanvasItem(
+            self._add_object(
+                QKnowledgePortStubCanvasObject(
                     node_id=node_id,
                     node_bounds=node_bounds,
                     direction="incoming",
@@ -943,7 +940,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
     def _slots_for_instance(self, node: Node) -> list[NodeSlot]:
         """Return the fully merged slot list for *node*, traversing the type chain."""
         from lks_utils.knowledge.resolver import Resolver
-        resolver = Resolver(self._session._io.repository)  # noqa: SLF001
+        resolver = Resolver(self._session.repository)  # noqa: SLF001
 
         type_node: Node | None = None
         if node.type_id is not None:
@@ -969,7 +966,7 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
     def _type_chain_for_instance(self, node: Node) -> list[Node]:
         """Return [outermost_ancestor, ..., direct_type] for an instance node."""
         from lks_utils.knowledge.resolver import Resolver
-        resolver = Resolver(self._session._io.repository)  # noqa: SLF001
+        resolver = Resolver(self._session.repository)  # noqa: SLF001
 
         type_node: Node | None = None
         if node.type_id is not None:
@@ -1128,8 +1125,8 @@ class QKnowledgeDecompositionCanvasWidget(QWidget):
             return
         self.row_selected.emit(slot_name)
 
-    def _on_item_selected(self, item: QKnowledgeFieldNodeCanvasItem) -> None:
-        self._canvas.select_item(item, additive=False)
+    def _on_item_selected(self, item: QKnowledgeFieldNodeCanvasObject) -> None:
+        self._canvas.select_object(item, additive=False)
 
     def _row_at_canvas_position(self, position: QPointF) -> FieldRow | None:
         """Return the FieldRow under *position* across all field items."""

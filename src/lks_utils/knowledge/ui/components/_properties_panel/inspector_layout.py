@@ -360,7 +360,6 @@ class _TypePropertyContractRow(QWidget):
         self._ref_required.setObjectName(f"type_slot_ref_required_{slot.name}")
         self._ref_required.setChecked(
             slot.ref_required
-            or slot.required
             or slot.effective_value_mode()
             in (PropertyValueMode.REF_ONLY, PropertyValueMode.REF_LIST)
         )
@@ -1495,19 +1494,28 @@ class QKnowledgeInspectorPanel(QWidget):
             payload["dirty_reason"] = dirty_reason
         self.mutation_applied.emit(payload)
 
-    def set_node(self, node: Node | None) -> None:
+    def set_node(
+        self,
+        node: Node | None,
+        *,
+        full_layout_sync: bool = True,
+    ) -> None:
         """Populate rows from *node*; pass ``None`` to clear."""
         self._remember_section_state()
         self._current_node = node
         self._selected_slot_name = None
         self._skip_next_rebuild_state_capture = True
-        self._rebuild()
+        self._rebuild(full_layout_sync=full_layout_sync)
 
     def prepare_node_for_display(self, node: Node) -> Node:
-        """Return a display-ready node, applying one-shot instance drift repair when needed."""
+        """Return a display-ready node, persisting one-shot instance drift repair when needed.
+
+        Intended for explicit open/load paths (e.g. primitive tab), not graph
+        canvas selection — selection must remain read-only.
+        """
         if node.type_id is None:
             return node
-        validator = InstanceValidator(self._session._io.repository)  # noqa: SLF001
+        validator = InstanceValidator(self._session.repository)  # noqa: SLF001
         repaired = validator.repair_node(node)
         if repaired is None:
             return node
@@ -1699,6 +1707,16 @@ class QKnowledgeInspectorPanel(QWidget):
                 return type_node
         return None
 
+    def _can_construct_inline_for_slot(self, slot: NodeSlot | None) -> bool:
+        if slot is None:
+            return False
+        if slot.effective_value_mode() not in {
+            PropertyValueMode.INLINE_ONLY,
+            PropertyValueMode.REF_OR_INLINE,
+        }:
+            return False
+        return self._promotable_type_node(slot) is not None
+
     def _default_inline_value_for_slot(self, slot: NodeSlot | None) -> dict[str, object]:
         type_node = self._promotable_type_node(slot)
         if type_node is None:
@@ -1857,7 +1875,7 @@ class QKnowledgeInspectorPanel(QWidget):
         """Build the 'extends (parent type)' picker row for a type node."""
         from lks_utils.knowledge.links.link_types.link_type_system import EXTENDS_LINK_TYPE_ID
 
-        repo = self._session._io.repository  # noqa: SLF001
+        repo = self._session.repository  # noqa: SLF001
         links = repo.list_links()
         parent_id: str | None = next(
             (lk.target_node_id for lk in links
@@ -1901,7 +1919,7 @@ class QKnowledgeInspectorPanel(QWidget):
         from lks_utils.knowledge.links.link_instance import LinkInstance
         from lks_utils.knowledge.links.link_types.link_type_system import EXTENDS_LINK_TYPE_ID
 
-        repo = self._session._io.repository  # noqa: SLF001
+        repo = self._session.repository  # noqa: SLF001
         links = repo.list_links()
         current_parent_id: str | None = next(
             (lk.target_node_id for lk in links
@@ -1995,7 +2013,7 @@ class QKnowledgeInspectorPanel(QWidget):
             for key, value in node.props.items()
             if key != "slots" and key not in RESERVED_VALIDATION_PROP_NAMES
         }
-        validator = InstanceValidator(self._session._io.repository)  # noqa: SLF001
+        validator = InstanceValidator(self._session.repository)  # noqa: SLF001
         version_issues = validator.version_issues(node)
         validation_errors: dict[str, str] = {}
         validation_status: str | None = None
@@ -2035,7 +2053,7 @@ class QKnowledgeInspectorPanel(QWidget):
             if not validation_errors:
                 validation_errors = {"node": str(exc)}
         visible_props: dict[str, object] = dict(props)
-        repository = self._session._io.repository  # noqa: SLF001
+        repository = self._session.repository  # noqa: SLF001
         node_id = str(node.id)
 
         # Rehydrate reference slots from slot_ref link assets.
@@ -2075,10 +2093,13 @@ class QKnowledgeInspectorPanel(QWidget):
                         "(empty ref)",
                         None,
                         self._session,
-                        can_create_inline=False,
+                        can_create_inline=self._can_construct_inline_for_slot(
+                            slot),
                     )
                     ref_row.pick_requested.connect(
                         lambda sn, n=node: self._pick_ref(n, sn))
+                    ref_row.create_requested.connect(
+                        lambda sn, n=node: self._create_inline_value(n, sn))
                     ref_row.clear_requested.connect(
                         lambda sn, n=node: self._clear_ref(n, sn))
                     if main_layout is not None:
@@ -2146,10 +2167,13 @@ class QKnowledgeInspectorPanel(QWidget):
                     ref_display,
                     ref_node,
                     self._session,
-                    can_create_inline=False,
+                    can_create_inline=self._can_construct_inline_for_slot(
+                        slot),
                 )
                 ref_row.pick_requested.connect(
                     lambda sn, n=node: self._pick_ref(n, sn))
+                ref_row.create_requested.connect(
+                    lambda sn, n=node: self._create_inline_value(n, sn))
                 ref_row.clear_requested.connect(
                     lambda sn, n=node: self._clear_ref(n, sn))
                 if main_layout is not None:
@@ -2281,10 +2305,14 @@ class QKnowledgeInspectorPanel(QWidget):
     def _save_field(self, node: Node, field: str, value: str) -> None:
         if self._current_node is None or str(node.id) != str(self._current_node.id):
             return
+        base = self._current_node
+        clean_value = str(value)
+        if str(getattr(base, field, "")) == clean_value:
+            return
         if field == "category":
             validation = validate_node_category_transition(
-                current_category=node.category,
-                proposed_category=str(value),
+                current_category=base.category,
+                proposed_category=clean_value,
             )
             if not validation.allowed:
                 QMessageBox.warning(
@@ -2295,10 +2323,10 @@ class QKnowledgeInspectorPanel(QWidget):
                 self._rebuild()
                 return
         selected_slot_snapshot = self._selected_slot_name
-        updated = node.model_copy(
-            update={field: str(value), "rev": node.rev + 1})
+        updated = base.model_copy(
+            update={field: clean_value, "rev": base.rev + 1})
         updated = self._apply_replacement_update(
-            node,
+            base,
             updated,
             dirty_reason=f"inspector field updated: {field}",
         )
@@ -2306,7 +2334,7 @@ class QKnowledgeInspectorPanel(QWidget):
         self._current_node = updated
         self._header.setText(f"Inspector — {updated.name}")
         self._rebuild(full_layout_sync=False)
-        self.node_mutated.emit(str(node.id))
+        self.node_mutated.emit(str(base.id))
 
     def _save_instance_category(self, node: Node, value: str) -> None:
         if not is_type(node):
@@ -2474,7 +2502,7 @@ class QKnowledgeInspectorPanel(QWidget):
         if not selected_id:
             return
         current_value = self._normalize_slot_ref_value(
-            self._session._io.repository,  # noqa: SLF001
+            self._session.repository,  # noqa: SLF001
             str(node.id),
             slot_name,
             is_list=True,
@@ -2504,7 +2532,7 @@ class QKnowledgeInspectorPanel(QWidget):
 
     def _remove_ref_list_item(self, node: Node, slot_name: str, index: int) -> None:
         current_value = self._normalize_slot_ref_value(
-            self._session._io.repository,  # noqa: SLF001
+            self._session.repository,  # noqa: SLF001
             str(node.id),
             slot_name,
             is_list=True,
@@ -2535,7 +2563,7 @@ class QKnowledgeInspectorPanel(QWidget):
 
     def _move_ref_list_item(self, node: Node, slot_name: str, index: int, delta: int) -> None:
         current_value = self._normalize_slot_ref_value(
-            self._session._io.repository,  # noqa: SLF001
+            self._session.repository,  # noqa: SLF001
             str(node.id),
             slot_name,
             is_list=True,

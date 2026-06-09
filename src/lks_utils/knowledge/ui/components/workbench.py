@@ -264,7 +264,7 @@ class QKnowledgeWorkbenchWidget(QWidget):
         slots: list[KnowledgeSlot] | None = None,
     ) -> str:
         node = make_type(type_kind, name, description, slots=slots or [])
-        result = self._session._io.upsert_node(node)  # noqa: SLF001
+        result = self._session.io_upsert_node(node)
         if not result.ok:
             raise ValueError(result.error_message or "Failed to create type")
         if base_type_id:
@@ -286,11 +286,10 @@ class QKnowledgeWorkbenchWidget(QWidget):
                 )
                 return {str(node.id), base_type_id}
 
-            result = self._session._io.apply_op(_mutate)  # noqa: SLF001
+            result = self._session.io_apply_op(_mutate)
             if not result.ok:
                 raise ValueError(
                     result.error_message or "Failed to add base type link")
-        self._session.notify_io_mutation("node")
         node_id = str(node.id)
         self.open_node(node_id)
         self._set_status(f"Created type: {name}")
@@ -300,11 +299,10 @@ class QKnowledgeWorkbenchWidget(QWidget):
         resolved_type_id = type_id or self._current_type_id()
         if resolved_type_id is None:
             raise ValueError("No type is selected")
-        result = self._session._io.add_slot_to_type(  # noqa: SLF001
+        result = self._session.io_add_slot_to_type(
             resolved_type_id, slot.model_dump())
         if not result.ok:
             raise ValueError(result.error_message or "Failed to add slot")
-        self._session.notify_io_mutation("node")
         self.open_node(resolved_type_id)
         self._set_status(f"Added slot: {slot.name}")
 
@@ -374,19 +372,18 @@ class QKnowledgeWorkbenchWidget(QWidget):
             props=initial_props,
         )
         node_id = str(node.id)
-        result = self._session._io.upsert_node(node)  # noqa: SLF001
+        result = self._session.io_upsert_node(node)
         if not result.ok:
             raise ValueError(
                 result.error_message or "Failed to create instance")
         for slot_name, ref_value in ref_props.items():
-            set_result = self._session._io.set_slot_value(  # noqa: SLF001
+            set_result = self._session.io_set_slot_value(
                 node_id, slot_name, ref_value)
             if not set_result.ok:
                 raise ValueError(
                     set_result.error_message
                     or f"Failed to set reference slot '{slot_name}'"
                 )
-        self._session.notify_io_mutation("node")
 
         self.open_node(node_id)
         self._set_status(f"Created instance: {name}")
@@ -408,12 +405,11 @@ class QKnowledgeWorkbenchWidget(QWidget):
         target = node_id or self._current_node_id
         if target is None:
             raise ValueError("No node is selected")
-        result = self._session._io.set_slot_value(  # noqa: SLF001
+        result = self._session.io_set_slot_value(
             target, slot_name, value)
         if not result.ok:
             raise ValueError(
                 result.error_message or "Failed to set slot value")
-        self._session.notify_io_mutation("node")
         self.open_node(target)
         self._set_status(f"Updated slot: {slot_name}")
 
@@ -421,12 +417,11 @@ class QKnowledgeWorkbenchWidget(QWidget):
         target = node_id or self._current_node_id
         if target is None:
             raise ValueError("No node is selected")
-        result = self._session._io.set_slot_value(  # noqa: SLF001
+        result = self._session.io_set_slot_value(
             target, slot_name, ref_node_id)
         if not result.ok:
             raise ValueError(
                 result.error_message or "Failed to set slot reference")
-        self._session.notify_io_mutation("node")
         self.open_node(target)
         self._set_status(f"Linked slot: {slot_name}")
 
@@ -434,12 +429,11 @@ class QKnowledgeWorkbenchWidget(QWidget):
         target = node_id or self._current_node_id
         if target is None:
             raise ValueError("No node is selected")
-        result = self._session._io.clear_slot_value(  # noqa: SLF001
+        result = self._session.io_clear_slot_value(
             target, slot_name)
         if not result.ok:
             raise ValueError(
                 result.error_message or "Failed to clear slot value")
-        self._session.notify_io_mutation("node")
         self.open_node(target)
         self._set_status(f"Cleared slot: {slot_name}")
 

@@ -7,8 +7,8 @@ from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtSvg import QSvgRenderer
 
-from lks_utils.gui_qt.canvas2d.canvas_item import CanvasItem
-from lks_utils.gui_qt.canvas2d.canvas_paint_context import CanvasPaintContext
+from lks_utils.gui_qt.canvas2d.canvas_object import CanvasObject
+from lks_utils.gui_qt.canvas2d.render.canvas_paint_context import CanvasPaintContext
 from lks_utils.knowledge.default_theme import (
     ADHOC_STUB_INCOMING_COLOR,
     ADHOC_STUB_OUTGOING_COLOR,
@@ -17,7 +17,7 @@ from lks_utils.knowledge.default_theme import (
 from lks_utils.spatial.aabb import AABB
 
 
-class QKnowledgePortStubCanvasItem(CanvasItem):
+class QKnowledgePortStubCanvasObject(CanvasObject):
     """Non-interactive directional stub for one ad-hoc link."""
 
     selectable: bool = False
@@ -278,4 +278,4 @@ class QKnowledgePortStubCanvasItem(CanvasItem):
         return top - (step * (self._index + 0.5))
 
 
-__all__ = ["QKnowledgePortStubCanvasItem"]
+__all__ = ["QKnowledgePortStubCanvasObject"]

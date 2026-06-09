@@ -82,7 +82,6 @@ BASE_VALUE_TYPES: tuple[str, ...] = (
     "any",
     "object",
     "string",
-    "str",
     "int",
     "integer",
     "float",
@@ -388,7 +387,6 @@ PRIMITIVE_FIELD_FACTORIES: dict[str, PrimitiveFieldFactory] = {
     "any": _make_string_field,
     "object": _make_string_field,
     "string": _make_string_field,
-    "str": _make_string_field,
     "json": _make_string_field,
     "int": _make_int_field,
     "integer": _make_int_field,
@@ -500,7 +498,7 @@ class SwappableDefaultField(QWidget):
         self._current.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         key = (value_type or "string").strip().lower()
-        if key in {"any", "object", "string", "str", "json", "complex", "bytes", "list", "tuple", "dict", "set", "vector2", "vector3", "vector4"}:
+        if key in {"any", "object", "string", "json", "complex", "bytes", "list", "tuple", "dict", "set", "vector2", "vector3", "vector4"}:
             line_edit = self._current.findChild(QLineEdit)
             if line_edit is not None and not line_edit.placeholderText():
                 line_edit.setPlaceholderText("default")

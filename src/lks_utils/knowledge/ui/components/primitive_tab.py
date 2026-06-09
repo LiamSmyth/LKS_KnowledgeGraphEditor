@@ -380,7 +380,7 @@ class QKnowledgePrimitiveTabWidget(QKnowledgeEditorTabBase):
     def _on_canvas_selection_changed(self) -> None:
         if self._current_node_id is None:
             return
-        if self._canvas._canvas.selected_items():  # noqa: SLF001
+        if self._canvas._canvas.selected_objects():  # noqa: SLF001
             return
         self._inspector.select_slot(None)
 
@@ -397,11 +397,10 @@ class QKnowledgePrimitiveTabWidget(QKnowledgeEditorTabBase):
             return
         try:
             node_id = self._current_node_id
-            result = self._session._io.add_slot_to_type(  # noqa: SLF001
+            result = self._session.io_add_slot_to_type(
                 node_id, slot.model_dump())
             if not result.ok:
                 raise ValueError(result.error_message or "Failed to add slot")
-            self._session.notify_io_mutation("node")
             self.open_node(self._current_node_id)
         except KeyError as exc:
             QMessageBox.warning(self, "Add Slot Failed",
@@ -439,7 +438,7 @@ class QKnowledgePrimitiveTabWidget(QKnowledgeEditorTabBase):
             if not ok:
                 return
             node_id = self._current_node_id
-            result = self._session._io.set_slot_value(  # noqa: SLF001
+            result = self._session.io_set_slot_value(
                 node_id, slot_name, value)
             if not result.ok:
                 QMessageBox.warning(
@@ -448,7 +447,6 @@ class QKnowledgePrimitiveTabWidget(QKnowledgeEditorTabBase):
                     result.error_message or "Unable to set slot value.",
                 )
                 return
-            self._session.notify_io_mutation("node")
         else:
             picker = QKnowledgeRefPickerDialog(
                 self._session, ref_type=slot.ref_type, slot_name=slot_name, parent=self
@@ -459,7 +457,7 @@ class QKnowledgePrimitiveTabWidget(QKnowledgeEditorTabBase):
             if ref_id is None:
                 return
             node_id = self._current_node_id
-            result = self._session._io.set_slot_value(  # noqa: SLF001
+            result = self._session.io_set_slot_value(
                 node_id, slot_name, ref_id)
             if not result.ok:
                 QMessageBox.warning(
@@ -468,7 +466,6 @@ class QKnowledgePrimitiveTabWidget(QKnowledgeEditorTabBase):
                     result.error_message or "Unable to set slot reference.",
                 )
                 return
-            self._session.notify_io_mutation("node")
         self.open_node(self._current_node_id)
 
     def _ask_slot(self, *, is_ref: bool) -> NodeSlot | None:

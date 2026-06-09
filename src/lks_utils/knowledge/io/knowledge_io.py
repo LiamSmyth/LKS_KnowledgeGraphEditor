@@ -12,12 +12,17 @@ from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING, Literal
 
+from lks_utils.knowledge.integrity_delta import IntegrityDelta, build_integrity_fingerprint
 from lks_utils.knowledge.integrity_issue import IntegrityIssue
 from lks_utils.knowledge.integrity_repairer import IntegrityRepairer
 from lks_utils.knowledge.integrity_reporter import IntegrityReporter
-from lks_utils.knowledge.instance_validator import InstanceValidator
+from lks_utils.knowledge._editor_session.clipboard import adopt_repository_snapshot
+from lks_utils.knowledge.io.touched_subgraph_snapshot import (
+    TouchedSubgraphSnapshot,
+    shallow_repository_copy,
+)
+from lks_utils.knowledge.instance_validator import InstanceValidator, PROTOTYPE_ID_PROP
 from lks_utils.knowledge.knowledge_change_event import KnowledgeChangeEvent
-from lks_utils.knowledge.knowledge_change_listener import KnowledgeChangeListener
 from lks_utils.knowledge.links.link_instance import LinkInstance
 from lks_utils.knowledge.links.link_type import LinkType, SLOT_REF_LINK_TYPE_ID
 from lks_utils.knowledge.models.node import Node
@@ -26,7 +31,15 @@ from lks_utils.knowledge.models.node_slot import NodeSlot, SlotSource
 from lks_utils.knowledge.models.type import as_type, is_type
 from lks_utils.knowledge.repository import Repository
 from lks_utils.knowledge.resolver import Resolver
+from lks_utils.knowledge.operations.delete_plan_query import DeletePlanQuery
+from lks_utils.knowledge.repository_indexes import RepositoryIndexes
 from lks_utils.knowledge.reverse_ref_index import ReverseRefIndex
+from lks_utils.knowledge.io.mutation_effects import (
+    JournalContext,
+    MutationEffects,
+    MutationKind,
+)
+from lks_utils.knowledge.io.mutation_policy import resolve_policy
 from lks_utils.knowledge.io.operation_result import (
     OperationResult,
     ValidationIssue,
@@ -101,7 +114,7 @@ class KnowledgeIO:
     def __init__(
         self,
         repository: Repository,
-        reverse_ref_index: ReverseRefIndex,
+        reverse_ref_index: RepositoryIndexes,
         *,
         validation_index: ValidationIndex | None = None,
         repository_root: Path | None = None,
@@ -109,10 +122,9 @@ class KnowledgeIO:
         self._repository = repository
         self._reverse_ref_index = reverse_ref_index
         self._validation_index = validation_index
-        self._repository_root = repository_root
+        inferred_root = getattr(repository, "_repo_root", None)
+        self._repository_root = repository_root if repository_root is not None else inferred_root
         self._lock = RLock()
-        # Event listeners are wired in a follow-up slice; keep the storage ready.
-        self._listeners: list[KnowledgeChangeListener] = []
         self._last_violations_by_entity: dict[str, list[IntegrityIssue]] = {}
 
     @classmethod
@@ -123,15 +135,32 @@ class KnowledgeIO:
         """
         root = Path(path)
         repo = Repository.load(root)
-        rri = ReverseRefIndex()
+        # Self-heal stale index snapshots: if there are more on-disk node files
+        # than loaded nodes, reload by disk scan so writes cannot re-clobber
+        # index.json from an incomplete in-memory view.
+        nodes_dir = root / "nodes"
+        disk_node_file_count = len(
+            list(nodes_dir.rglob("*.json"))) if nodes_dir.exists() else 0
+        loaded_node_count = len(repo.list_nodes())
+        if disk_node_file_count > loaded_node_count:
+            try:
+                repo = Repository.load_from_disk_scan(root)
+                repo._sync_index()  # noqa: SLF001
+            except Exception:
+                # Keep the indexed load if disk-scan repair fails unexpectedly.
+                pass
+        rri = RepositoryIndexes()
         rri.rebuild_from(repo)
         io = cls(
             repository=repo,
             reverse_ref_index=rri,
             repository_root=root,
         )
-        result = io.apply_op(cls.seed_system_link_types,
-                             validation_mode=ValidationMode.TOUCHED)
+        result = io.apply_op(
+            cls.seed_system_link_types,
+            validation_mode=ValidationMode.TOUCHED,
+            hint=MutationKind.TYPE_SCHEMA,
+        )
         if result.status == "error":
             raise RuntimeError(
                 f"Failed to seed system link types for repository {root}: {result.error_message}"
@@ -143,15 +172,18 @@ class KnowledgeIO:
         """Load a repository by scanning disk files directly, ignoring any stale index."""
         root = Path(path)
         repo = Repository.load_from_disk_scan(root)
-        rri = ReverseRefIndex()
+        rri = RepositoryIndexes()
         rri.rebuild_from(repo)
         io = cls(
             repository=repo,
             reverse_ref_index=rri,
             repository_root=root,
         )
-        result = io.apply_op(cls.seed_system_link_types,
-                             validation_mode=ValidationMode.TOUCHED)
+        result = io.apply_op(
+            cls.seed_system_link_types,
+            validation_mode=ValidationMode.TOUCHED,
+            hint=MutationKind.TYPE_SCHEMA,
+        )
         if result.status == "error":
             raise RuntimeError(
                 f"Failed to seed system link types for repository {root}: {result.error_message}"
@@ -183,38 +215,47 @@ class KnowledgeIO:
         mutator_fn: Callable[[Repository], set[str]],
         *,
         validation_mode: ValidationMode = ValidationMode.TOUCHED,
+        hint: MutationKind = MutationKind.INSTANCE_PROPERTY,
+        journal: JournalContext | None = None,
+        structural_change: bool = False,
+        rollback_scope: frozenset[str] | None = None,
+        validation_fanout_ids: frozenset[str] | None = None,
+        integrity_delta: IntegrityDelta | None = None,
     ) -> OperationResult:
-        """Apply one mutation atomically and return a typed result.
+        """Apply one in-place mutation atomically and return a typed result.
 
-        *mutator_fn* receives a **deep-copy** snapshot of the repository, may
-        mutate it freely, and must return the set of string IDs it touched.
-        Unknown IDs in the returned set are silently ignored during
-        classification.
+        *mutator_fn* receives the live repository, mutates it in place, and
+        must return the set of string IDs it touched.  A scoped
+        :class:`TouchedSubgraphSnapshot` supports rollback on failure when
+        *rollback_scope* is provided.
 
-        The method:
-        1. Deep-copies the repository into a snapshot.
-        2. Runs *mutator_fn* against the snapshot.
-        3. Rejects the mutation if fatal integrity violations exist.
-        4. Classifies touched IDs into nodes / link-types / links.
-        5. Updates the reverse-ref index incrementally.
-        6. Swaps ``self._repository`` to the new snapshot.
-        7. Persists via ``save_touched`` when *repository_root* is set.
-        8. Optionally triggers an incremental validation recompute.
-        9. Returns :class:`OperationResult`.
+        Pipeline: in-place mutate → persist → integrity delta → fanout
+        recompute → journal.
         """
+        policy = resolve_policy(hint, structural_change)
+        effective_validation = (
+            ValidationMode.EXPANDED
+            if validation_fanout_ids is not None
+            else policy.validation_mode
+        )
+        scope = rollback_scope or frozenset()
+
         with self._lock:
-            old_repo = self._repository
-            with profile_action("knowledge.io.apply_op", phase="snapshot_clone"):
-                snapshot = copy.deepcopy(self._repository)
+            live_repo = self._repository
+            with profile_action("knowledge.io.apply_op", phase="snapshot_capture"):
+                old_repo = shallow_repository_copy(live_repo)
+                undo = TouchedSubgraphSnapshot.capture(live_repo, scope)
 
             with profile_action("knowledge.io.apply_op", phase="mutator"):
-                raw_ids = mutator_fn(snapshot)
+                raw_ids = mutator_fn(live_repo)
                 touched_ids: set[str] = {str(tid) for tid in raw_ids}
+            directly_changed = frozenset(touched_ids)
 
-            # Integrity gate — fatal violations abort the mutation.
             with profile_action("knowledge.io.apply_op", phase="integrity_gate"):
-                fatal = IntegrityReporter.fatal_only(snapshot)
+                fatal = IntegrityReporter.fatal_only(live_repo)
             if fatal:
+                adopt_repository_snapshot(target=live_repo, source=old_repo)
+                undo.restore(live_repo)
                 return OperationResult(
                     status="error",
                     touched_ids=frozenset(),
@@ -225,16 +266,12 @@ class KnowledgeIO:
 
             with profile_action("knowledge.io.apply_op", phase="classify_touched"):
                 t_nodes, t_link_types, t_links = _classify_touched_ids(
-                    old_repo, snapshot, touched_ids, self._reverse_ref_index
+                    old_repo,
+                    live_repo,
+                    touched_ids,
+                    self._reverse_ref_index,
                 )
 
-            with profile_action("knowledge.io.apply_op", phase="incremental_ref_update"):
-                _apply_incremental_ref_update(
-                    old_repo, snapshot, t_nodes, t_links, self._reverse_ref_index
-                )
-            self._repository = snapshot
-
-            # Persist incrementally.
             save_error: str | None = None
             if self._repository_root is not None:
                 try:
@@ -247,7 +284,7 @@ class KnowledgeIO:
                             "touched_links": len(t_links),
                         },
                     ):
-                        self._repository.save_touched(
+                        live_repo.save_touched(
                             self._repository_root,
                             touched_node_ids=t_nodes,
                             touched_link_type_ids=t_link_types,
@@ -257,38 +294,175 @@ class KnowledgeIO:
                 except Exception as exc:  # pragma: no cover
                     save_error = str(exc)
 
-            # Validation recompute (skipped when no index is injected).
+            if save_error is not None:
+                undo.restore(live_repo)
+                with profile_action(
+                    "knowledge.io.apply_op", phase="incremental_ref_update"
+                ):
+                    _apply_incremental_ref_update(
+                        old_repo,
+                        live_repo,
+                        t_nodes,
+                        t_links,
+                        self._reverse_ref_index,
+                    )
+                return OperationResult(
+                    status="error",
+                    touched_ids=frozenset(),
+                    validated_ids=frozenset(),
+                    issues=(),
+                    save_error=save_error,
+                    error_message=save_error,
+                )
+
+            if integrity_delta is not None and self._validation_index is not None:
+                with profile_action("knowledge.io.apply_op", phase="integrity_delta"):
+                    self._validation_index.apply_integrity_delta(integrity_delta)
+            elif policy.run_integrity_scan and self._validation_index is not None:
+                structural_sig = build_integrity_fingerprint(live_repo)
+                if structural_sig != self._validation_index._cached_integrity_sig:  # noqa: SLF001
+                    self._validation_index.refresh_integrity_cache(live_repo)
+
+            with profile_action("knowledge.io.apply_op", phase="incremental_ref_update"):
+                _apply_incremental_ref_update(
+                    old_repo,
+                    live_repo,
+                    t_nodes,
+                    t_links,
+                    self._reverse_ref_index,
+                )
+
             validated_ids: frozenset[str] = frozenset()
             issues: tuple[ValidationIssue, ...] = ()
-            if self._validation_index is not None:
+            recompute_ids = (
+                set(validation_fanout_ids)
+                if validation_fanout_ids is not None
+                else set(touched_ids)
+            )
+            if self._validation_index is not None and recompute_ids:
                 with profile_action(
                     "knowledge.io.apply_op",
                     phase="validation_recompute",
                     metadata={
-                        "touched_ids": len(touched_ids),
-                        "impact_mode": validation_mode.value,
+                        "touched_ids": len(recompute_ids),
+                        "impact_mode": effective_validation.value,
                     },
                 ):
                     changed = self._validation_index.recompute(
-                        touched_ids=touched_ids,
-                        impact_mode=validation_mode.value,
+                        touched_ids=recompute_ids,
+                        impact_mode=effective_validation.value,
                     )
-                touched_ids |= changed
-                validated_ids = frozenset(touched_ids)
+                recompute_ids |= changed
+                validated_ids = frozenset(recompute_ids)
                 issues = _collect_issues(self._validation_index, validated_ids)
 
+            journal_record = self._append_mutation_journal(
+                hint=hint,
+                journal=journal,
+                directly_changed=directly_changed,
+                old_repo=old_repo,
+                snapshot=live_repo,
+                run_integrity_scan=False,
+            )
+            effects = MutationEffects(
+                directly_changed=directly_changed,
+                persisted=self._repository_root is not None,
+                validated_ids=validated_ids,
+                structural_change=structural_change,
+                mutation_kind=hint,
+                journal_record=journal_record,
+            )
+
             return OperationResult(
-                status="ok" if save_error is None else "error",
+                status="ok",
                 touched_ids=frozenset(touched_ids),
                 validated_ids=validated_ids,
                 issues=issues,
-                save_error=save_error,
-                error_message=save_error,
+                effects=effects,
             )
+
+    def mutate(
+        self,
+        mutator_fn: Callable[[Repository], set[str]],
+        *,
+        validation_mode: ValidationMode = ValidationMode.TOUCHED,
+        hint: MutationKind = MutationKind.INSTANCE_PROPERTY,
+        journal: JournalContext | None = None,
+        structural_change: bool = False,
+    ) -> OperationResult:
+        """Alias for :meth:`apply_op` — preferred name for new callers."""
+        return self.apply_op(
+            mutator_fn,
+            validation_mode=validation_mode,
+            hint=hint,
+            journal=journal,
+            structural_change=structural_change,
+        )
 
     # ------------------------------------------------------------------
     # Typed wrappers (Slice 1: no-resolution paths only)
     # ------------------------------------------------------------------
+
+    def _instance_contract_error(
+        self,
+        repo: Repository,
+        node: Node,
+        *,
+        candidate_props: dict[str, object] | None = None,
+    ) -> str | None:
+        """Return an error string when an instance violates type schema contract."""
+        if node.category == "_type":
+            return None
+
+        effective_props = (
+            {**node.props, **candidate_props}
+            if candidate_props is not None
+            else dict(node.props)
+        )
+
+        prototype_id = effective_props.get(PROTOTYPE_ID_PROP)
+        if prototype_id is not None and not isinstance(prototype_id, str):
+            return (
+                f"Malformed {PROTOTYPE_ID_PROP!r}: expected a string node id, "
+                f"got {type(prototype_id).__name__}"
+            )
+
+        if node.type_id is None:
+            return None
+
+        type_node = repo.find_node(str(node.type_id))
+        if type_node is None:
+            return f"Type node not found: {node.type_id}"
+        if not is_type(type_node):
+            return f"type_id {node.type_id} does not reference a type node"
+
+        type_model = as_type(type_node)
+        props_payload = effective_props
+        declared_slots = {slot.name for slot in type_model.slots}
+        unknown = sorted(
+            {key for key in props_payload if key not in declared_slots})
+        if unknown:
+            return (
+                "Tried to upsert with property that does not exist on the type. "
+                f"Unknown slot keys: {unknown}"
+            )
+
+        candidate_node = node.model_copy(update={"props": props_payload})
+        try:
+            InstanceValidator(repo).validate_node(candidate_node)
+        except ValueError as exc:
+            return f"Property value/type validation failed: {exc}"
+
+        if isinstance(prototype_id, str) and prototype_id:
+            prototype_node = repo.find_node(prototype_id)
+            if prototype_node is None:
+                return f"Prototype instance not found: {prototype_id}"
+            if str(prototype_node.type_id) != str(node.type_id):
+                return (
+                    f"Prototype instance {prototype_id} has type_id {prototype_node.type_id}; "
+                    f"expected {node.type_id}"
+                )
+        return None
 
     def upsert_node(self, node: Node, *, bundle_id: str | None = None) -> OperationResult:
         """Insert or replace one node.
@@ -299,27 +473,41 @@ class KnowledgeIO:
         _ = bundle_id
         node_id = str(node.id)
 
+        contract_error = self._instance_contract_error(self._repository, node)
+        if contract_error is not None:
+            return OperationResult(
+                status="error",
+                touched_ids=frozenset(),
+                validated_ids=frozenset(),
+                issues=(),
+                error_message=contract_error,
+            )
+
+        is_structural = self._repository.find_node(node_id) is None
+
         def mutator(repo: Repository) -> set[str]:
             repo.upsert(node)
             return {node_id}
 
-        result = self.apply_op(mutator)
-        if result.ok:
-            self._run_post_write_integrity(node_id)
-            self._emit(
-                KnowledgeChangeEvent(
-                    event_type="node_upserted",
-                    entity_id=node_id,
-                    entity_type="node",
-                    bundle_id=bundle_id,
-                    timestamp=time.time(),
-                    violations=list(
-                        self._last_violations_by_entity.get(node_id, [])),
-                )
-            )
-        return result
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.NODE_UPSERT,
+            journal=JournalContext(
+                event_type="node_upserted",
+                entity_id=node_id,
+                entity_type="node",
+                bundle_id=bundle_id,
+            ),
+            structural_change=is_structural,
+            rollback_scope=frozenset({node_id}),
+        )
 
-    def delete_node(self, node_id: str | NodeId) -> OperationResult:
+    def delete_node(
+        self,
+        node_id: str | NodeId,
+        *,
+        bundle_id: str | None = None,
+    ) -> OperationResult:
         """Delete one node (no-resolution path — no incoming-ref check).
 
         Cascade-deletes all links whose source or target is *node_id*.
@@ -327,6 +515,14 @@ class KnowledgeIO:
         Touched set: ``{node_id} + affected_link_ids + index.json``
         """
         key = str(node_id)
+        fanout = DeletePlanQuery(
+            self._repository, self._reverse_ref_index
+        ).node_delete_fanout([key])
+        rollback_scope = frozenset(fanout.targets) | frozenset(fanout.cascade_link_ids)
+        integrity_delta = IntegrityDelta(
+            removed_link_ids=frozenset(fanout.integrity_link_delta),
+            removed_node_ids=frozenset(fanout.targets),
+        )
 
         def mutator(repo: Repository) -> set[str]:
             touched: set[str] = {key}
@@ -337,7 +533,20 @@ class KnowledgeIO:
             repo.delete(key)
             return touched
 
-        return self.apply_op(mutator)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.NODE_DELETE,
+            journal=JournalContext(
+                event_type="node_deleted",
+                entity_id=key,
+                entity_type="node",
+                bundle_id=bundle_id,
+            ),
+            structural_change=True,
+            rollback_scope=rollback_scope,
+            validation_fanout_ids=fanout.validation_fanout_ids,
+            integrity_delta=integrity_delta,
+        )
 
     def remove_node(
         self,
@@ -346,22 +555,7 @@ class KnowledgeIO:
         bundle_id: str | None = None,
     ) -> OperationResult:
         """Compatibility API: delegate node removal through ``delete_node``."""
-        _ = bundle_id
-        result = self.delete_node(node_id)
-        if result.ok:
-            self._run_post_write_integrity(str(node_id))
-            self._emit(
-                KnowledgeChangeEvent(
-                    event_type="node_deleted",
-                    entity_id=str(node_id),
-                    entity_type="node",
-                    bundle_id=bundle_id,
-                    timestamp=time.time(),
-                    violations=list(
-                        self._last_violations_by_entity.get(str(node_id), [])),
-                )
-            )
-        return result
+        return self.delete_node(node_id, bundle_id=bundle_id)
 
     def upsert_link(
         self,
@@ -391,23 +585,24 @@ class KnowledgeIO:
             repo.upsert_link(link)
             return {link_id, link.source_node_id, link.target_node_id}
 
-        result = self.apply_op(mutator)
-        if result.ok:
-            self._run_post_write_integrity(link_id)
-            self._emit(
-                KnowledgeChangeEvent(
-                    event_type="link_upserted",
-                    entity_id=link_id,
-                    entity_type="link",
-                    bundle_id=bundle_id,
-                    timestamp=time.time(),
-                    violations=list(
-                        self._last_violations_by_entity.get(link_id, [])),
-                )
-            )
-        return result
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.LINK_STRUCTURE,
+            journal=JournalContext(
+                event_type="link_upserted",
+                entity_id=link_id,
+                entity_type="link",
+                bundle_id=bundle_id,
+            ),
+            structural_change=True,
+        )
 
-    def delete_link(self, link: LinkInstance) -> OperationResult:
+    def delete_link(
+        self,
+        link: LinkInstance,
+        *,
+        bundle_id: str | None = None,
+    ) -> OperationResult:
         """Delete one link edge.
 
         For slot_ref links, also evicts any stale slot payload from the source
@@ -450,7 +645,17 @@ class KnowledgeIO:
                     touched.add(source_id)
             return touched
 
-        return self.apply_op(mutator)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.LINK_STRUCTURE,
+            journal=JournalContext(
+                event_type="link_deleted",
+                entity_id=link_id,
+                entity_type="link",
+                bundle_id=bundle_id,
+            ),
+            structural_change=True,
+        )
 
     def remove_link(
         self,
@@ -469,21 +674,7 @@ class KnowledgeIO:
                 issues=(),
                 error_message=f"Link not found: {link_id}",
             )
-        result = self.delete_link(link)
-        if result.ok:
-            self._run_post_write_integrity(link_id)
-            self._emit(
-                KnowledgeChangeEvent(
-                    event_type="link_deleted",
-                    entity_id=link_id,
-                    entity_type="link",
-                    bundle_id=bundle_id,
-                    timestamp=time.time(),
-                    violations=list(
-                        self._last_violations_by_entity.get(link_id, [])),
-                )
-            )
-        return result
+        return self.delete_link(link, bundle_id=bundle_id)
 
     def upsert_link_type(
         self,
@@ -519,21 +710,17 @@ class KnowledgeIO:
                     touched.add(link.target_node_id)
             return touched
 
-        result = self.apply_op(mutator)
-        if result.ok:
-            self._run_post_write_integrity(lt_id)
-            self._emit(
-                KnowledgeChangeEvent(
-                    event_type="link_type_upserted",
-                    entity_id=lt_id,
-                    entity_type="link_type",
-                    bundle_id=bundle_id,
-                    timestamp=time.time(),
-                    violations=list(
-                        self._last_violations_by_entity.get(lt_id, [])),
-                )
-            )
-        return result
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.TYPE_SCHEMA,
+            journal=JournalContext(
+                event_type="link_type_upserted",
+                entity_id=lt_id,
+                entity_type="link_type",
+                bundle_id=bundle_id,
+            ),
+            structural_change=True,
+        )
 
     # ------------------------------------------------------------------
     # Property mutation helpers (WO2)
@@ -568,7 +755,6 @@ class KnowledgeIO:
             When *expected_revision_id* is provided and does not match.
         """
         from lks_utils.knowledge.io.conflict_error import ConflictError
-        from lks_utils.knowledge.models.type import as_type, is_type
 
         key = str(node_id)
         # Capture in a one-element list so the mutator can signal early exits
@@ -590,23 +776,30 @@ class KnowledgeIO:
                 )
                 return set()
 
-            # Unknown-key validation (only for typed nodes)
-            if node.type_id is not None:
-                type_node = repo.find_node(str(node.type_id))
-                if type_node is not None and is_type(type_node):
-                    slot_names = {s.name for s in as_type(type_node).slots}
-                    unknown = {k for k in props if k not in slot_names}
-                    if unknown:
-                        _early[0] = f"Unknown slot keys: {sorted(unknown)}"
-                        return set()
-
             merged = {**node.props, **props}
+            contract_error = self._instance_contract_error(
+                repo,
+                node,
+                candidate_props=merged,
+            )
+            if contract_error is not None:
+                _early[0] = contract_error
+                return set()
+
             updated = node.model_copy(
                 update={"props": merged, "rev": node.rev + 1})
             repo.upsert(updated)
             return {key}
 
-        result = self.apply_op(mutator)
+        result = self.apply_op(
+            mutator,
+            hint=MutationKind.INSTANCE_PROPERTY,
+            journal=JournalContext(
+                event_type="node_upserted",
+                entity_id=key,
+                entity_type="node",
+            ),
+        )
 
         if _conflict[0] is not None:
             raise _conflict[0]
@@ -750,7 +943,16 @@ class KnowledgeIO:
             repo.upsert(updated)
             return {key}
 
-        result = self.apply_op(mutator)
+        result = self.apply_op(
+            mutator,
+            hint=MutationKind.NODE_UPSERT,
+            journal=JournalContext(
+                event_type="node_upserted",
+                entity_id=key,
+                entity_type="node",
+            ),
+            structural_change=True,
+        )
 
         if _conflict[0] is not None:
             raise _conflict[0]
@@ -764,34 +966,46 @@ class KnowledgeIO:
             )
         return result
 
-    def subscribe(self, listener: KnowledgeChangeListener) -> None:
-        """Register a change listener if not already registered."""
-        if not hasattr(listener, "on_knowledge_change"):
-            raise TypeError(
-                "listener must implement on_knowledge_change(event)"
-            )
-        if listener not in self._listeners:
-            self._listeners.append(listener)
+    def _append_mutation_journal(
+        self,
+        *,
+        hint: MutationKind,
+        journal: JournalContext | None,
+        directly_changed: frozenset[str],
+        old_repo: Repository,
+        snapshot: Repository,
+        run_integrity_scan: bool,
+    ) -> KnowledgeChangeEvent | None:
+        """Append one journal record for a successful mutate."""
+        if not directly_changed:
+            return None
 
-    def unsubscribe(self, listener: KnowledgeChangeListener) -> None:
-        """Unregister a previously registered listener."""
-        if listener in self._listeners:
-            self._listeners.remove(listener)
+        ctx = journal or _infer_journal_context(
+            hint,
+            directly_changed,
+            old_repo=old_repo,
+            snapshot=snapshot,
+        )
+        if ctx is None:
+            return None
 
-    def _emit(self, event: KnowledgeChangeEvent) -> None:
-        """Emit one change event to all registered listeners."""
+        if run_integrity_scan:
+            self._run_post_write_integrity(ctx.entity_id)
+        event = KnowledgeChangeEvent(
+            event_type=ctx.event_type,  # type: ignore[arg-type]
+            entity_id=ctx.entity_id,
+            entity_type=ctx.entity_type,
+            bundle_id=ctx.bundle_id,
+            timestamp=time.time(),
+            violations=list(
+                self._last_violations_by_entity.get(ctx.entity_id, [])),
+        )
         if self._repository_root is not None:
             try:
                 append_change_event(self._repository_root, event)
             except Exception:
-                # Journal persistence must not break write-path behavior.
                 pass
-        for listener in list(self._listeners):
-            try:
-                listener.on_knowledge_change(event)
-            except Exception:
-                # Listener failures must not break write-path behavior.
-                continue
+        return event
 
     def _run_post_write_integrity(self, entity_id: str) -> None:
         """Run non-blocking post-write integrity reporting for one mutation."""
@@ -801,44 +1015,52 @@ class KnowledgeIO:
         except Exception:
             violations = []
         self._last_violations_by_entity[entity_id] = violations
-        if self._validation_index is not None:
-            try:
-                self._validation_index.recompute(
-                    touched_ids={entity_id},
-                    impact_mode=ValidationMode.TOUCHED.value,
-                )
-            except Exception:
-                pass
 
     # ------------------------------------------------------------------
     # Cascade-delete suite (WO2)
     # ------------------------------------------------------------------
 
     def check_delete_impact(self, node_id: str | NodeId) -> dict[str, object]:
-        """Return link-instance blocking info for deleting *node_id*.
+        """Return delete fanout preview for *node_id* (read-only).
 
-        **Read-only** — does not mutate the repository.
-
-        Returns
-        -------
-        dict with keys:
-
-        * ``blocking_link_ids`` — IDs of links where node appears as source or target.
-        * ``blocking_link_count`` — Count of those links.
-        * ``incident_link_types`` — Sorted unique link-type IDs used by those links.
+        Shape matches UI ``preview_delete_nodes`` fanout fields plus legacy
+        incident-link keys for MCP callers.
         """
         key = str(node_id)
-        blocking = [
-            link
-            for link in self._repository.list_links()
-            if link.source_node_id == key or link.target_node_id == key
-        ]
-        incident_types = sorted({str(link.link_type_id) for link in blocking})
+        fanout = DeletePlanQuery(
+            self._repository, self._reverse_ref_index
+        ).node_delete_fanout([key])
+        incident_link_ids = list(fanout.cascade_link_ids)
+        incident_types = sorted(
+            {
+                str(self._indexes_link_type(link_id))
+                for link_id in incident_link_ids
+                if self._indexes_link_type(link_id) is not None
+            }
+        )
         return {
-            "blocking_link_ids": [link.id for link in blocking],
-            "blocking_link_count": len(blocking),
+            "targets": list(fanout.targets),
+            "incoming_system_refs": [
+                {
+                    "source_node_id": ref.source_node_id,
+                    "source_slot_path": list(ref.source_slot_path),
+                    "target_node_id": ref.target_node_id,
+                    "is_resolved": ref.is_resolved,
+                }
+                for ref in fanout.incoming_system_refs
+            ],
+            "ux_tier": fanout.ux_tier,
+            "is_safe": fanout.ux_tier == "silent",
+            "cascade_link_ids": incident_link_ids,
+            "affected_view_paths": list(fanout.affected_view_paths),
+            "blocking_link_ids": incident_link_ids,
+            "blocking_link_count": len(incident_link_ids),
             "incident_link_types": incident_types,
         }
+
+    def _indexes_link_type(self, link_id: str) -> str | None:
+        link = self._reverse_ref_index.link_by_id(link_id)
+        return str(link.link_type_id) if link is not None else None
 
     def delete_node_safe(self, node_id: str | NodeId) -> OperationResult:
         """Delete one node; fails fast when incident links exist.
@@ -865,11 +1087,7 @@ class KnowledgeIO:
                 ),
             )
 
-        def mutator(repo: Repository) -> set[str]:
-            repo.delete(key)
-            return {key}
-
-        return self.apply_op(mutator)
+        return self.delete_node(node_id)
 
     def delete_node_cascade(self, node_id: str | NodeId) -> OperationResult:
         """Atomically delete one node and all incident links.
@@ -908,7 +1126,11 @@ class KnowledgeIO:
             repo.delete_link_type(lt_id)
             return touched
 
-        return self.apply_op(mutator)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.TYPE_SCHEMA,
+            structural_change=True,
+        )
 
     def clear_repo_contents(self) -> OperationResult:
         """Delete all nodes, links, and link types from the repository.
@@ -932,11 +1154,18 @@ class KnowledgeIO:
                 repo.delete(str(node.id))
             return touched_before
 
-        return self.apply_op(mutator, validation_mode=ValidationMode.TOUCHED)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.NODE_DELETE,
+            structural_change=True,
+        )
 
     def ensure_system_link_types(self) -> OperationResult:
         """Ensure built-in system link types exist via the IO write path."""
-        return self.apply_op(self.seed_system_link_types)
+        return self.apply_op(
+            self.seed_system_link_types,
+            hint=MutationKind.TYPE_SCHEMA,
+        )
 
     def save_snapshot(self) -> OperationResult:
         """Persist the current snapshot through the IO save pipeline."""
@@ -967,12 +1196,56 @@ class KnowledgeIO:
         """Rebuild index.json from the current in-memory repository snapshot."""
         return self.save_snapshot()
 
+    def sync_index(self) -> OperationResult:
+        """Force a sidecar ``index.json`` refresh for the current repository root."""
+        if self._repository_root is None:
+            return OperationResult(
+                status="error",
+                touched_ids=frozenset(),
+                validated_ids=frozenset(),
+                issues=(),
+                error_message="Repository root is not set",
+            )
+
+        try:
+            with self._lock:
+                self._repository._sync_index()  # noqa: SLF001
+        except Exception as exc:
+            return OperationResult(
+                status="error",
+                touched_ids=frozenset(),
+                validated_ids=frozenset(),
+                issues=(),
+                error_message=str(exc),
+            )
+
+        return OperationResult(
+            status="ok",
+            touched_ids=frozenset(),
+            validated_ids=frozenset(),
+            issues=(),
+        )
+
     # ------------------------------------------------------------------
     # MCP-facing convenience methods
     # ------------------------------------------------------------------
 
     def upsert_nodes(self, nodes: list[Node]) -> OperationResult:
         """Insert or replace multiple nodes in one atomic operation."""
+
+        for node in nodes:
+            contract_error = self._instance_contract_error(
+                self._repository, node)
+            if contract_error is not None:
+                return OperationResult(
+                    status="error",
+                    touched_ids=frozenset(),
+                    validated_ids=frozenset(),
+                    issues=(),
+                    error_message=(
+                        f"Node {node.name!r} ({node.id}) rejected: {contract_error}"
+                    ),
+                )
 
         def mutator(repo: Repository) -> set[str]:
             touched: set[str] = set()
@@ -981,7 +1254,13 @@ class KnowledgeIO:
                 touched.add(str(node.id))
             return touched
 
-        return self.apply_op(mutator)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.NODE_UPSERT,
+            structural_change=any(
+                self._repository.find_node(str(node.id)) is None for node in nodes
+            ),
+        )
 
     def upsert_links(self, links: list[LinkInstance]) -> OperationResult:
         """Insert or replace multiple links in one atomic operation."""
@@ -1006,7 +1285,11 @@ class KnowledgeIO:
                 touched.add(link.target_node_id)
             return touched
 
-        return self.apply_op(mutator)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.LINK_STRUCTURE,
+            structural_change=True,
+        )
 
     def upsert_link_types(self, link_types: list[LinkType]) -> OperationResult:
         """Insert or replace multiple link types in one atomic operation."""
@@ -1029,7 +1312,11 @@ class KnowledgeIO:
                 touched.add(str(link_type.id))
             return touched
 
-        return self.apply_op(mutator)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.TYPE_SCHEMA,
+            structural_change=True,
+        )
 
     def list_nodes(self) -> list[Node]:
         """Return all nodes from the live repository snapshot."""
@@ -1195,6 +1482,329 @@ class KnowledgeIO:
         ]
         return {"types": types_payload, "link_types": link_types_payload}
 
+    def get_repo_inventory(self, mode: Literal["ids_only", "compact"] = "compact") -> dict[str, object]:
+        """Return a token-efficient repository inventory with lineage context.
+
+        ``ids_only`` minimizes payload size while preserving relational shape.
+        ``compact`` includes human-readable names to avoid follow-up id lookups.
+        """
+        if mode not in {"ids_only", "compact"}:
+            raise ValueError("mode must be one of: ids_only, compact")
+
+        resolver = Resolver(self._repository)
+        all_nodes = self.list_nodes()
+        all_link_types = self.list_link_types()
+
+        type_nodes = [node for node in all_nodes if node.category == "_type"]
+        type_name_by_id: dict[str, str] = {}
+        type_chain_ids_by_id: dict[str, list[str]] = {}
+        type_chain_names_by_id: dict[str, list[str]] = {}
+        type_rows: list[dict[str, object]] = []
+        for type_node in sorted(type_nodes, key=lambda item: item.name.casefold()):
+            type_id = str(type_node.id)
+            parent_chain = resolver.fetch_parent_chain(type_node)
+            parent_chain_ids = [str(parent.id) for parent in parent_chain]
+            parent_chain_names = [parent.name for parent in parent_chain]
+            type_name_by_id[type_id] = type_node.name
+            type_chain_ids_by_id[type_id] = list(parent_chain_ids)
+            type_chain_names_by_id[type_id] = list(parent_chain_names)
+            row: dict[str, object] = {
+                "id": type_id,
+                "parent_chain_ids": parent_chain_ids,
+            }
+            if mode == "compact":
+                row["name"] = type_node.name
+                row["category"] = type_node.category
+                row["parent_chain_names"] = parent_chain_names
+            type_rows.append(row)
+
+        instance_rows: list[dict[str, object]] = []
+        for instance_node in sorted((node for node in all_nodes if node.category != "_type"), key=lambda item: item.name.casefold()):
+            instance_id = str(instance_node.id)
+            type_id = str(
+                instance_node.type_id) if instance_node.type_id is not None else None
+            row = {
+                "id": instance_id,
+                "type_id": type_id,
+            }
+            if mode == "compact":
+                row["name"] = instance_node.name
+                row["category"] = instance_node.category
+                row["type_name"] = type_name_by_id.get(
+                    type_id) if type_id else None
+                row["type_parent_chain_ids"] = type_chain_ids_by_id.get(
+                    type_id, []) if type_id else []
+                row["type_parent_chain_names"] = type_chain_names_by_id.get(
+                    type_id, []) if type_id else []
+            instance_rows.append(row)
+
+        link_type_rows: list[dict[str, object]] = []
+        for link_type in sorted(all_link_types, key=lambda item: item.name.casefold()):
+            row = {
+                "id": link_type.id,
+                # Link types are currently modeled as a flat vocabulary (no inheritance tree).
+                "parent_chain_ids": [],
+            }
+            if mode == "compact":
+                row["name"] = link_type.name
+                row["inverse_name"] = link_type.inverse_name
+                row["cardinality"] = link_type.cardinality
+                row["is_system"] = link_type.is_system
+                row["parent_chain_names"] = []
+            link_type_rows.append(row)
+
+        return {
+            "mode": mode,
+            "counts": {
+                "types": len(type_rows),
+                "instances": len(instance_rows),
+                "link_types": len(link_type_rows),
+            },
+            "types": type_rows,
+            "instances": instance_rows,
+            "link_types": link_type_rows,
+        }
+
+    def list_instances_grouped_by_type(self, mode: Literal["ids_only", "compact"] = "compact") -> list[dict[str, object]]:
+        """Return instance rows grouped by their resolved type for fast dedupe checks."""
+        if mode not in {"ids_only", "compact"}:
+            raise ValueError("mode must be one of: ids_only, compact")
+
+        all_nodes = self.list_nodes()
+        type_name_by_id = {
+            str(node.id): node.name
+            for node in all_nodes
+            if node.category == "_type"
+        }
+
+        grouped: dict[str, list[Node]] = {}
+        for node in all_nodes:
+            if node.category == "_type" or node.type_id is None:
+                continue
+            grouped.setdefault(str(node.type_id), []).append(node)
+
+        rows: list[dict[str, object]] = []
+        for type_id in sorted(grouped.keys(), key=lambda key: (type_name_by_id.get(key, "").casefold(), key)):
+            instances = sorted(
+                grouped[type_id], key=lambda item: item.name.casefold())
+            payload = {
+                "type_id": type_id,
+                "instance_count": len(instances),
+                "instances": [
+                    ({"id": str(node.id)} if mode == "ids_only" else {
+                        "id": str(node.id),
+                        "name": node.name,
+                        "category": node.category,
+                    })
+                    for node in instances
+                ],
+            }
+            if mode == "compact":
+                payload["type_name"] = type_name_by_id.get(type_id)
+            rows.append(payload)
+        return rows
+
+    def suggest_existing_nodes(
+        self,
+        name_query: str,
+        *,
+        category: str | None = None,
+        type_query: str | None = None,
+        max_results: int = 20,
+    ) -> list[dict[str, object]]:
+        """Suggest likely existing nodes before creating new entities.
+
+        Ranking is name-token-first and stays lightweight by returning compact rows.
+        """
+        token = normalize_search_text(name_query)
+        if not token:
+            return []
+
+        type_filter_id: str | None = None
+        if type_query is not None:
+            type_filter = self.resolve_type_query(type_query)
+            type_filter_id = str(type_filter.id)
+
+        nodes = self.list_nodes()
+        scored: list[tuple[int, Node]] = []
+        for node in nodes:
+            if category is not None and node.category != category:
+                continue
+            if type_filter_id is not None and str(node.type_id) != type_filter_id:
+                continue
+            candidate = normalize_search_text(node.name)
+            if not candidate:
+                continue
+            if candidate == token:
+                score = 0
+            elif token in candidate:
+                score = 1
+            else:
+                continue
+            scored.append((score, node))
+
+        scored.sort(key=lambda item: (
+            item[0], item[1].name.casefold(), str(item[1].id)))
+        limited = scored[: max(0, int(max_results))]
+
+        type_name_by_id = {
+            str(node.id): node.name
+            for node in nodes
+            if node.category == "_type"
+        }
+        return [
+            {
+                "id": str(node.id),
+                "name": node.name,
+                "category": node.category,
+                "type_id": str(node.type_id) if node.type_id is not None else None,
+                "type_name": type_name_by_id.get(str(node.type_id)) if node.type_id is not None else None,
+                "match": "exact" if score == 0 else "contains",
+            }
+            for score, node in limited
+        ]
+
+    def get_repo_authoring_context(self) -> dict[str, object]:
+        """Return guidance-oriented, token-efficient context for MCP authoring loops.
+
+        This payload helps callers answer:
+        - what already exists (types/instances/link types)
+        - where naming is ambiguous (duplicate names)
+        - what read sequence to run before writes
+        """
+        resolver = Resolver(self._repository)
+        all_nodes = self.list_nodes()
+        all_link_types = self.list_link_types()
+
+        type_nodes = [node for node in all_nodes if node.category == "_type"]
+        instance_nodes = [
+            node for node in all_nodes if node.category != "_type"]
+
+        type_rows: list[dict[str, object]] = []
+        for type_node in sorted(type_nodes, key=lambda item: item.name.casefold()):
+            parent_chain = resolver.fetch_parent_chain(type_node)
+            instance_category = str(
+                type_node.props.get("instance_category", ""))
+            type_rows.append(
+                {
+                    "id": str(type_node.id),
+                    "name": type_node.name,
+                    "instance_category": instance_category,
+                    "parent_chain_ids": [str(parent.id) for parent in parent_chain],
+                    "parent_chain_names": [parent.name for parent in parent_chain],
+                }
+            )
+
+        type_name_by_id = {row["id"]: row["name"] for row in type_rows}
+
+        instance_rows: list[dict[str, object]] = []
+        categories: set[str] = set()
+        for node in sorted(instance_nodes, key=lambda item: item.name.casefold()):
+            categories.add(node.category)
+            type_id = str(node.type_id) if node.type_id is not None else None
+            instance_rows.append(
+                {
+                    "id": str(node.id),
+                    "name": node.name,
+                    "category": node.category,
+                    "type_id": type_id,
+                    "type_name": type_name_by_id.get(type_id) if type_id else None,
+                }
+            )
+
+        link_type_rows = [
+            {
+                "id": link_type.id,
+                "name": link_type.name,
+                "inverse_name": link_type.inverse_name,
+                "cardinality": link_type.cardinality,
+                "is_system": link_type.is_system,
+            }
+            for link_type in sorted(all_link_types, key=lambda item: item.name.casefold())
+        ]
+
+        node_name_to_ids: dict[str, list[str]] = {}
+        for node in all_nodes:
+            node_name_to_ids.setdefault(node.name, []).append(str(node.id))
+        duplicate_node_names = [
+            {
+                "name": name,
+                "ids": sorted(ids),
+                "count": len(ids),
+            }
+            for name, ids in sorted(node_name_to_ids.items(), key=lambda item: item[0].casefold())
+            if len(ids) > 1
+        ]
+
+        link_type_name_to_ids: dict[str, list[str]] = {}
+        for link_type in all_link_types:
+            link_type_name_to_ids.setdefault(
+                link_type.name, []).append(link_type.id)
+        duplicate_link_type_names = [
+            {
+                "name": name,
+                "ids": sorted(ids),
+                "count": len(ids),
+            }
+            for name, ids in sorted(link_type_name_to_ids.items(), key=lambda item: item[0].casefold())
+            if len(ids) > 1
+        ]
+
+        recommended_sequence = [
+            {
+                "step": 1,
+                "tool": "get_repo_inventory",
+                "args": {"mode": "compact"},
+                "why": "Establish baseline types/instances/link types with lineage in one read.",
+            },
+            {
+                "step": 2,
+                "tool": "list_instances_grouped_by_type",
+                "args": {"mode": "compact"},
+                "why": "Detect existing instances by type before creating new nodes.",
+            },
+            {
+                "step": 3,
+                "tool": "suggest_existing_nodes",
+                "args": {
+                    "name_query": "<candidate_name>",
+                    "max_results": 10,
+                },
+                "why": "Prevent duplicate name creation and surface near matches.",
+            },
+            {
+                "step": 4,
+                "tool": "ensure_instance",
+                "args": {
+                    "type_name": "<resolved_type_name>",
+                    "name": "<instance_name>",
+                },
+                "why": "Use typed semantic upsert path instead of ad-hoc payloads.",
+            },
+        ]
+
+        return {
+            "stats": {
+                "type_count": len(type_rows),
+                "instance_count": len(instance_rows),
+                "link_type_count": len(link_type_rows),
+            },
+            "categories": sorted(categories),
+            "types": type_rows,
+            "instances": instance_rows,
+            "link_types": link_type_rows,
+            "ambiguity_report": {
+                "duplicate_node_names": duplicate_node_names,
+                "duplicate_link_type_names": duplicate_link_type_names,
+            },
+            "recommended_sequence": recommended_sequence,
+            "safety_rules": [
+                "Resolve type identity before writing instance nodes.",
+                "Prefer ensure_instance/ensure_link over raw upsert payloads in authoring loops.",
+                "If duplicates exist by name, use id-based disambiguation before mutation.",
+            ],
+        }
+
     def get_parent_chain(self, type_id: str) -> list[Node]:
         """Return ordered ancestor types for a type node."""
         resolver = Resolver(self._repository)
@@ -1241,6 +1851,51 @@ class KnowledgeIO:
         payload["hydrated_props"] = _jsonify(
             resolver.hydrate_node_with_inheritance(node))
         return payload
+
+    def get_instance_bases(self, instance_id: str) -> dict[str, object]:
+        """Return schema/base lineage for one instance.
+
+        Includes resolved type summary, prototype chain (nearest parent first),
+        and effective schema slot names.
+        """
+        node = self.get_node(instance_id)
+        if is_type(node):
+            raise ValueError(
+                "Node is a type; use get_parent_chain for type ancestry")
+
+        resolver = Resolver(self._repository)
+        type_node = resolver.resolve_type_node_for_instance(node)
+
+        def _summary(item: Node) -> dict[str, object]:
+            return {
+                "id": str(item.id),
+                "name": item.name,
+                "category": item.category,
+                "type_id": str(item.type_id) if item.type_id is not None else None,
+            }
+
+        prototype_chain: list[dict[str, object]] = []
+        seen: set[str] = set()
+        current = node
+        while True:
+            prototype_id = current.props.get(PROTOTYPE_ID_PROP)
+            if not isinstance(prototype_id, str) or not prototype_id:
+                break
+            if prototype_id in seen:
+                break
+            seen.add(prototype_id)
+            prototype = self.find_node(prototype_id)
+            if prototype is None:
+                break
+            prototype_chain.append(_summary(prototype))
+            current = prototype
+
+        return {
+            "instance": _summary(node),
+            "type": _summary(type_node) if type_node is not None else None,
+            "prototype_chain": prototype_chain,
+            "schema_slot_names": sorted(resolver.available_slot_names(node)),
+        }
 
     def get_node_slot_names(self, node_id: str, effective: bool = True) -> list[str]:
         """Return slot/property names for a type or instance node."""
@@ -1579,7 +2234,15 @@ class KnowledgeIO:
             }
             return {node_id, *before, *after}
 
-        return self.apply_op(mutator)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.INSTANCE_PROPERTY_REF,
+            journal=JournalContext(
+                event_type="node_upserted",
+                entity_id=node_id,
+                entity_type="node",
+            ),
+        )
 
     def clear_slot_value(self, node_id: str, slot_name: str) -> OperationResult:
         """Clear one node slot value through the IO write path."""
@@ -1599,7 +2262,15 @@ class KnowledgeIO:
             }
             return {node_id, *before, *after}
 
-        return self.apply_op(mutator)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.INSTANCE_PROPERTY_REF,
+            journal=JournalContext(
+                event_type="node_upserted",
+                entity_id=node_id,
+                entity_type="node",
+            ),
+        )
 
     def set_slot_values(self, node_id: str, updates: dict[str, object]) -> OperationResult:
         """Set multiple node slot values through the IO write path."""
@@ -1620,7 +2291,15 @@ class KnowledgeIO:
             }
             return {node_id, *before, *after}
 
-        return self.apply_op(mutator)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.INSTANCE_PROPERTY_REF,
+            journal=JournalContext(
+                event_type="node_upserted",
+                entity_id=node_id,
+                entity_type="node",
+            ),
+        )
 
     def clear_slot_values(self, node_id: str, slot_names: list[str]) -> OperationResult:
         """Clear multiple node slot values through the IO write path."""
@@ -1641,7 +2320,15 @@ class KnowledgeIO:
             }
             return {node_id, *before, *after}
 
-        return self.apply_op(mutator)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.INSTANCE_PROPERTY_REF,
+            journal=JournalContext(
+                event_type="node_upserted",
+                entity_id=node_id,
+                entity_type="node",
+            ),
+        )
 
     def promote_inline(
         self,
@@ -1673,7 +2360,11 @@ class KnowledgeIO:
             }
             return {str(result_id), parent_id, *before, *after}
 
-        return self.apply_op(mutator), (promoted_id[0] if promoted_id else None)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.INSTANCE_PROPERTY_REF,
+            structural_change=True,
+        ), (promoted_id[0] if promoted_id else None)
 
     def inline_ref(self, parent_id: str, prop_path: str) -> OperationResult:
         """Inline a single-ref node back into parent props through IO."""
@@ -1692,7 +2383,11 @@ class KnowledgeIO:
             }
             return {parent_id, *before, *after}
 
-        return self.apply_op(mutator)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.INSTANCE_PROPERTY_REF,
+            structural_change=True,
+        )
 
     def add_slot_to_type(self, type_id: str, slot: dict[str, object]) -> OperationResult:
         """Add or replace one slot on a type node through IO."""
@@ -1701,7 +2396,11 @@ class KnowledgeIO:
             Mutator(repo).add_slot(type_id=type_id, slot=slot)
             return {type_id}
 
-        return self.apply_op(mutator)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.TYPE_SCHEMA,
+            structural_change=True,
+        )
 
     def remove_slot_from_type(self, type_id: str, slot_name: str) -> OperationResult:
         """Remove one slot by name from a type node through IO."""
@@ -1710,7 +2409,11 @@ class KnowledgeIO:
             Mutator(repo).remove_slot(type_id=type_id, slot_name=slot_name)
             return {type_id}
 
-        return self.apply_op(mutator)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.TYPE_SCHEMA,
+            structural_change=True,
+        )
 
     def update_slot_on_type(self, type_id: str, original_name: str, slot: dict[str, object]) -> OperationResult:
         """Update one slot contract on a type node through IO."""
@@ -1720,7 +2423,11 @@ class KnowledgeIO:
                                       slot_name=original_name, slot=slot)
             return {type_id}
 
-        return self.apply_op(mutator)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.TYPE_SCHEMA,
+            structural_change=True,
+        )
 
     def check_integrity(self, mode: str = "report_only") -> tuple[OperationResult | None, dict[str, object]]:
         """Report integrity issues and optionally apply safe/prune repairs through IO."""
@@ -1758,7 +2465,11 @@ class KnowledgeIO:
             payload.append(report)
             return touched
 
-        result = self.apply_op(mutator)
+        result = self.apply_op(
+            mutator,
+            hint=MutationKind.LINK_STRUCTURE,
+            structural_change=True,
+        )
         return result, (payload[0] if payload else {"mode": mode, "issue_count": 0, "issues": []})
 
     # ------------------------------------------------------------------
@@ -1775,7 +2486,9 @@ class KnowledgeIO:
         to determine whether a :class:`DeleteResolution` is required before
         calling :meth:`delete_nodes`.
         """
-        return analyze_delete_impact(self._repository, node_ids)
+        return DeletePlanQuery(
+            self._repository, self._reverse_ref_index
+        ).node_delete_impact(node_ids)
 
     def preview_delete_links(
         self,
@@ -1896,6 +2609,14 @@ class KnowledgeIO:
                 )
 
         str_ids = [str(nid) for nid in node_ids]
+        fanout = DeletePlanQuery(
+            self._repository, self._reverse_ref_index
+        ).node_delete_fanout(str_ids)
+        rollback_scope = frozenset(fanout.targets) | frozenset(fanout.cascade_link_ids)
+        integrity_delta = IntegrityDelta(
+            removed_link_ids=frozenset(fanout.integrity_link_delta),
+            removed_node_ids=frozenset(fanout.targets),
+        )
 
         def mutator(repo: Repository) -> set[str]:
             touched: set[str] = set()
@@ -1907,19 +2628,75 @@ class KnowledgeIO:
                     src = repo.find_node(ref.source_node_id)
                     if src is None:
                         continue
-                    if ref.source_slot_path == ("type_id",):
+                    if ref.source_slot_path in {("type_id",), ("instance_of",)}:
                         if entry.mode == "remove_ref":
-                            repo.upsert(src.model_copy(
-                                update={"type_id": None}))
-                            touched.add(src.id)
+                            from lks_utils.knowledge.links.link_types.link_type_system import (
+                                clear_instance_of_edge,
+                            )
+
+                            remaining = clear_instance_of_edge(
+                                list(repo.list_links()),
+                                source_node_id=str(src.id),
+                            )
+                            for link in list(repo.list_links()):
+                                if link not in remaining:
+                                    repo.delete_link(link.id)
+                                    touched.add(link.id)
+                            if src.type_id is not None:
+                                repo.upsert(src.model_copy(update={"type_id": None}))
+                                touched.add(src.id)
                         elif entry.mode == "replace" and entry.replacement_id is not None:
+                            from lks_utils.knowledge.links.link_types.link_type_system import (
+                                set_instance_of_edge,
+                            )
+
+                            updated_links = set_instance_of_edge(
+                                list(repo.list_links()),
+                                source_node_id=str(src.id),
+                                target_type_id=entry.replacement_id,
+                            )
+                            existing = {str(link.id) for link in repo.list_links()}
+                            for link in updated_links:
+                                if str(link.id) not in existing:
+                                    repo.upsert_link(link)
+                                    touched.add(link.id)
                             repo.upsert(
                                 src.model_copy(
-                                    update={"type_id": NodeId.from_str(
-                                        entry.replacement_id)}
+                                    update={"type_id": NodeId.from_str(entry.replacement_id)}
                                 )
                             )
                             touched.add(src.id)
+                        continue
+
+                    if ref.source_slot_path == ("extends",):
+                        if entry.mode == "remove_ref":
+                            from lks_utils.knowledge.links.link_types.link_type_system import (
+                                clear_extends_edge,
+                            )
+
+                            remaining = clear_extends_edge(
+                                list(repo.list_links()),
+                                source_node_id=str(src.id),
+                            )
+                            for link in list(repo.list_links()):
+                                if link not in remaining:
+                                    repo.delete_link(link.id)
+                                    touched.add(link.id)
+                        elif entry.mode == "replace" and entry.replacement_id is not None:
+                            from lks_utils.knowledge.links.link_types.link_type_system import (
+                                set_extends_edge,
+                            )
+
+                            updated_links = set_extends_edge(
+                                list(repo.list_links()),
+                                source_node_id=str(src.id),
+                                target_type_id=entry.replacement_id,
+                            )
+                            existing = {str(link.id) for link in repo.list_links()}
+                            for link in updated_links:
+                                if str(link.id) not in existing:
+                                    repo.upsert_link(link)
+                                    touched.add(link.id)
                         continue
 
                     slot_name: str | None
@@ -1959,7 +2736,14 @@ class KnowledgeIO:
 
             return touched
 
-        return self.apply_op(mutator)
+        return self.apply_op(
+            mutator,
+            hint=MutationKind.NODE_DELETE,
+            structural_change=True,
+            rollback_scope=rollback_scope,
+            validation_fanout_ids=fanout.validation_fanout_ids,
+            integrity_delta=integrity_delta,
+        )
 
     @property
     def repository(self) -> Repository:
@@ -1977,7 +2761,7 @@ class KnowledgeIO:
         self._repository_root = value
 
     @property
-    def reverse_ref_index(self) -> ReverseRefIndex:
+    def reverse_ref_index(self) -> RepositoryIndexes:
         """Return the reverse-ref index maintained alongside the repository."""
         return self._reverse_ref_index
 
@@ -2187,6 +2971,45 @@ def _collect_issues(
             result.append(ValidationIssue(
                 object_id=oid, reasons=status.reasons))
     return tuple(result)
+
+
+def _infer_journal_context(
+    hint: MutationKind,
+    directly_changed: frozenset[str],
+    *,
+    old_repo: Repository,
+    snapshot: Repository,
+) -> JournalContext | None:
+    """Best-effort journal metadata when typed facades omit explicit context."""
+    if not directly_changed:
+        return None
+
+    if hint is MutationKind.NODE_DELETE:
+        entity_id = next(iter(directly_changed))
+        return JournalContext("node_deleted", entity_id, "node")
+
+    if hint is MutationKind.LINK_STRUCTURE:
+        for link_id in sorted(directly_changed):
+            if old_repo.find_link(link_id) and snapshot.find_link(link_id) is None:
+                return JournalContext("link_deleted", link_id, "link")
+            if old_repo.find_link(link_id) is None and snapshot.find_link(link_id):
+                return JournalContext("link_upserted", link_id, "link")
+        link_id = next(iter(directly_changed))
+        return JournalContext("link_upserted", link_id, "link")
+
+    if hint is MutationKind.TYPE_SCHEMA:
+        for entity_id in sorted(directly_changed):
+            if old_repo.find_link_type(entity_id) or snapshot.find_link_type(entity_id):
+                return JournalContext("link_type_upserted", entity_id, "link_type")
+        entity_id = next(iter(directly_changed))
+        return JournalContext("link_type_upserted", entity_id, "link_type")
+
+    for entity_id in sorted(directly_changed):
+        if old_repo.find_node(entity_id) or snapshot.find_node(entity_id):
+            return JournalContext("node_upserted", entity_id, "node")
+
+    entity_id = next(iter(directly_changed))
+    return JournalContext("node_upserted", entity_id, "node")
 
 
 __all__ = [

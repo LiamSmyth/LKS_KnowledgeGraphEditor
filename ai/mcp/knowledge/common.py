@@ -17,9 +17,15 @@ def resolve_existing_repo(path: str) -> Path:
 
 
 def _build_io(path: str) -> KnowledgeIO:
-    """Construct a :class:`KnowledgeIO` from a repository path."""
+    """Construct a :class:`KnowledgeIO` from a repository path.
+
+    Use disk-scan load mode so MCP reads are authoritative against on-disk
+    node/link files even when ``index.json`` is stale. This prevents
+    index-clobber regressions where a stale indexed snapshot could be persisted
+    back and temporarily hide valid node files from graph views.
+    """
     resolved = resolve_existing_repo(path)
-    return KnowledgeIO.from_path(resolved)
+    return KnowledgeIO.from_disk_scan(resolved)
 
 
 def result_envelope(result: OperationResult) -> dict[str, Any]:

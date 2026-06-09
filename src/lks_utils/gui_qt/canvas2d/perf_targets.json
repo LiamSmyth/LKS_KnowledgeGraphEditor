@@ -2,14 +2,105 @@
     "$schema": "../../../../profiling/perf_targets.schema.json",
     "targets": {
         "canvas2d.frame": {
-            "description": "Full canvas frame render at 1080p (pan/zoom gesture).",
+            "description": "Full canvas frame render during pan/zoom (4K simulation gate).",
             "budget": {
                 "p95_ms": 16.6
             },
-            "test_id": "src/lks_utils/gui_qt/canvas2d/test/perf_canvas_frame_test.py::test_canvas_frame_render_perf",
+            "test_id": "src/lks_utils/gui_qt/canvas2d/interaction/test/pan_zoom_simulation_test.py::test_canvas2d_pan_zoom_simulation",
             "scenario_callable": "lks_utils.gui_qt.canvas2d.scenarios.full_frame",
             "surface_kind": "INTERACTIVE",
             "device_focus": [
+                "GPU"
+            ]
+        },
+        "canvas2d.select": {
+            "description": "Discrete canvas click-select interaction (4K simulation gate).",
+            "budget": {
+                "p95_ms": 100.0
+            },
+            "test_id": "src/lks_utils/gui_qt/canvas2d/interaction/test/selection_simulation_test.py::test_canvas2d_select_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU",
+                "GPU"
+            ]
+        },
+        "canvas2d.rubber_band": {
+            "description": "Live rubber-band marquee selection (4K simulation gate).",
+            "budget": {
+                "p95_ms": 16.6
+            },
+            "test_id": "src/lks_utils/gui_qt/canvas2d/interaction/test/rubber_band_simulation_test.py::test_canvas2d_rubber_band_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU",
+                "GPU"
+            ]
+        },
+        "canvas2d.resize": {
+            "description": "Live resize-handle drag on capability host (4K simulation gate).",
+            "budget": {
+                "p95_ms": 16.6
+            },
+            "test_id": "src/lks_utils/gui_qt/canvas2d/interaction/test/resize_simulation_test.py::test_canvas2d_resize_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU",
+                "GPU"
+            ]
+        },
+        "canvas2d.drag_move": {
+            "description": "Live single-object drag move (4K simulation gate).",
+            "budget": {
+                "p95_ms": 16.6
+            },
+            "test_id": "src/lks_utils/gui_qt/canvas2d/interaction/test/drag_move_simulation_test.py::test_canvas2d_drag_move_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU",
+                "GPU"
+            ]
+        },
+        "canvas2d.multi_select": {
+            "description": "Discrete shift-click additive multi-select (4K simulation gate).",
+            "budget": {
+                "p95_ms": 100.0
+            },
+            "test_id": "src/lks_utils/gui_qt/canvas2d/interaction/test/multi_select_simulation_test.py::test_canvas2d_multi_select_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU",
+                "GPU"
+            ]
+        },
+        "canvas2d.multi_drag_move": {
+            "description": "Live multi-selected group drag move (4K simulation gate).",
+            "budget": {
+                "p95_ms": 16.6
+            },
+            "test_id": "src/lks_utils/gui_qt/canvas2d/interaction/test/multi_drag_move_simulation_test.py::test_canvas2d_multi_drag_move_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU",
+                "GPU"
+            ]
+        },
+        "canvas2d.drag_drop": {
+            "description": "Discrete image file drop onto empty canvas (C2D-08).",
+            "budget": {
+                "p95_ms": 150.0
+            },
+            "test_id": "src/lks_utils/gui_qt/canvas2d/widgets/test/canvas2d_drop_simulation_test.py::test_canvas2d_drop_simulation",
+            "scenario_callable": null,
+            "surface_kind": "INTERACTIVE",
+            "device_focus": [
+                "CPU",
                 "GPU"
             ]
         },
@@ -18,8 +109,8 @@
             "budget": {
                 "p95_ms": 8.0
             },
-            "test_id": "src/lks_utils/gui_qt/canvas2d/test/perf_overlay_test.py::test_overlay_render_perf",
-            "scenario_callable": "lks_utils.gui_qt.canvas2d.scenarios.overlay_render",
+            "test_id": "src/lks_utils/gui_qt/canvas2d/interaction/test/rubber_band_simulation_test.py::test_canvas2d_rubber_band_simulation",
+            "scenario_callable": null,
             "surface_kind": "INTERACTIVE",
             "device_focus": [
                 "GPU"
@@ -30,8 +121,8 @@
             "budget": {
                 "p95_ms": 500.0
             },
-            "test_id": "src/lks_utils/gui_qt/canvas2d/test/perf_init_test.py::test_canvas_init_perf",
-            "scenario_callable": "lks_utils.gui_qt.canvas2d.scenarios.widget_init",
+            "test_id": "src/lks_utils/gui_qt/canvas2d/interaction/test/selection_simulation_test.py::test_canvas2d_select_simulation",
+            "scenario_callable": null,
             "surface_kind": "INIT",
             "device_focus": [
                 "GPU"
@@ -42,7 +133,7 @@
             "budget": {
                 "p95_ms": 0.5
             },
-            "test_id": "src/lks_utils/gui_qt/canvas2d/test/canvas_widget_adapter_perf_test.py::test_canvas_pixmap_widget_item_perf",
+            "test_id": "src/lks_utils/gui_qt/canvas2d/widgets/test/canvas_widget_adapter_perf_test.py::test_canvas_pixmap_widget_object_perf",
             "scenario_callable": "lks_utils.gui_qt.canvas2d.scenarios.pixmap_widget_paint_cached",
             "surface_kind": "INTERACTIVE",
             "device_focus": [
@@ -55,7 +146,7 @@
             "budget": {
                 "p95_ms": 5.0
             },
-            "test_id": "src/lks_utils/gui_qt/canvas2d/test/canvas_widget_adapter_perf_test.py::test_canvas_pixmap_widget_item_perf",
+            "test_id": "src/lks_utils/gui_qt/canvas2d/widgets/test/canvas_widget_adapter_perf_test.py::test_canvas_pixmap_widget_object_perf",
             "scenario_callable": "lks_utils.gui_qt.canvas2d.scenarios.pixmap_widget_paint_cold",
             "surface_kind": "INTERACTIVE",
             "device_focus": [

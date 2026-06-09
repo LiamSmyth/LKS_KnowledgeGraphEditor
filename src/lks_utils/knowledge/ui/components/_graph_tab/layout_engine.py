@@ -54,7 +54,7 @@ from lks_utils.knowledge.ui.widgets.graph_canvas import (
     BatchPlacementPayload,
     estimate_graph_node_size_for_proxy,
 )
-from lks_utils.knowledge.ui.widgets.graph_node_canvas_item import QKnowledgeGraphNodeCanvasItem
+from lks_utils.knowledge.ui.widgets.graph_node_canvas_object import QKnowledgeGraphNodeCanvasObject
 from lks_utils.gui_qt.base.async_task_runner import WorkerThread
 from lks_utils.knowledge.ui.components import graph_tab as graph_tab_module
 
@@ -92,10 +92,10 @@ def _on_apply_traversal_selected(self, action_key: str) -> None:
             selected_local_ids = set()
 
     if not selected_local_ids:
-        active_item = self._canvas.active_selected_item()
-        if isinstance(active_item, QKnowledgeGraphNodeCanvasItem):
-            for local_id, item in self._canvas._local_node_items.items():  # noqa: SLF001
-                if item is active_item and local_id in current.nodes:
+        active_object = self._canvas.active_selected_object()
+        if isinstance(active_object, QKnowledgeGraphNodeCanvasObject):
+            for local_id, item in self._canvas._local_node_objects.items():  # noqa: SLF001
+                if item is active_object and local_id in current.nodes:
                     selected_local_ids = {local_id}
                     break
 
@@ -500,7 +500,7 @@ def _on_save_all(self) -> None:
 
 def load_graph_view_by_id(self, view_id: str) -> None:
     """Load a persisted GraphView by id from the active repository."""
-    graph_view = CanvasIO.load_graph_view(self._session._io, view_id)  # noqa: SLF001
+    graph_view = self._session.load_graph_view(view_id)
     nodes_by_id = {
         str(node.id): node for node in self._session.list_nodes()}
     self.set_graph_view(graph_view, nodes_by_id=nodes_by_id)

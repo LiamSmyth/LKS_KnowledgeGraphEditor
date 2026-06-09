@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from lks_utils.knowledge.io.mutation_effects import MutationEffects
 
 
 class ValidationMode(str, Enum):
@@ -48,6 +51,7 @@ class OperationResult:
     blocking_impact: Any = None
     save_error: str | None = None
     error_message: str | None = None
+    effects: MutationEffects | None = None
 
     @property
     def ok(self) -> bool:

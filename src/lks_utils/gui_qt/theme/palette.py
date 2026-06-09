@@ -46,31 +46,46 @@ PALETTE: dict[str, str] = {
     "export_region_outline_active": "#ffe066",
     "export_region_label_bg": "#000000a0",
 
-    # Canvas2D demo / sample items (used by the canvas2d demo widget
-    # and the sample CanvasItem implementations). Kept here so the
+    # Canvas2D demo / sample objects (used by the canvas2d demo widget
+    # and the sample CanvasObject implementations). Kept here so the
     # canvas2d/ tree stays palette-clean per Phase F of the
     # 2026-04-29 canvas2d foundation checklist.
-    "canvas2d_item_outline": "#222222",         # default item border
-    "canvas2d_item_outline_minimap": "#111111",  # darker pen for minimap
-    "canvas2d_text_label": "#000000",           # in-item label text
-    "canvas2d_grid_minor": "#3a3a3a",           # GridLabelCanvasItem grid
+    "canvas2d_object_outline": "#222222",         # default object border
+    "canvas2d_object_outline_minimap": "#111111",  # darker pen for minimap
+    "canvas2d_text_label": "#000000",           # in-object label text
+    "canvas2d_grid_minor": "#3a3a3a",           # GridLabelCanvasObject grid
     "canvas2d_grid_axis_x": "#ff2d2d",          # X axis (red)
     "canvas2d_grid_axis_y": "#66aa66",          # Y axis (green-ish)
     "canvas2d_hud_text": "#dddddd",             # CoordHudOverlay text
     "canvas2d_debug_bounds_stroke": "#ff0000",  # CanvasBoundsOverlay pen
     "canvas2d_debug_bounds_label": "#ff4444",   # CanvasBoundsOverlay label text
     "canvas2d_demo_backdrop": "#ff1a1a2e",      # ColorBackdrop demo default
+    "canvas2d_node_header_bg": "#2a2a2a",
+    "canvas2d_node_header_title": "#e8e8e8",
+    "canvas2d_node_stroke": "#555555",
+    "canvas2d_node_fill": "#1e1e1e",
+    "canvas2d_node_header_subtitle": "#9ab0d0",
+    "canvas2d_demo_node_header_bg": "#2a3344",
+    "canvas2d_demo_node_header_title": "#e8eef8",
+    "canvas2d_demo_node_fill": "#1a2030",
+}
+
+
+_LEGACY_PALETTE_ALIASES: dict[str, str] = {
+    "canvas2d_item_outline": "canvas2d_object_outline",
+    "canvas2d_item_outline_minimap": "canvas2d_object_outline_minimap",
 }
 
 
 def get(name: str) -> str:
     """Return the palette colour by name, raising a clear error if missing."""
-    if name not in PALETTE:
+    canonical = _LEGACY_PALETTE_ALIASES.get(name, name)
+    if canonical not in PALETTE:
         raise KeyError(
             f"PALETTE has no colour {name!r}. "
             f"Add it to lks_utils/gui_qt/theme/palette.py."
         )
-    return PALETTE[name]
+    return PALETTE[canonical]
 
 
 __all__ = ["PALETTE", "get"]

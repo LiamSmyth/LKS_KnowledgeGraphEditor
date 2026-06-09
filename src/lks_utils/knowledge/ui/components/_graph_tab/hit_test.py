@@ -55,8 +55,8 @@ from lks_utils.knowledge.ui.widgets.graph_canvas import (
     BatchPlacementPayload,
     estimate_graph_node_size_for_proxy,
 )
-from lks_utils.knowledge.ui.widgets.graph_link_canvas_item import QKnowledgeGraphLinkCanvasItem
-from lks_utils.knowledge.ui.widgets.graph_node_canvas_item import QKnowledgeGraphNodeCanvasItem
+from lks_utils.knowledge.ui.widgets.graph_link_canvas_object import QKnowledgeGraphLinkCanvasObject
+from lks_utils.knowledge.ui.widgets.graph_node_canvas_object import QKnowledgeGraphNodeCanvasObject
 from lks_utils.gui_qt.base.async_task_runner import WorkerThread
 from lks_utils.profiling import profile_action
 
@@ -155,7 +155,14 @@ def _preserve_selection_layout(self):
         _schedule_splitter_restore(right_splitter, right_sizes)
 
 
-def _on_canvas_node_selected(self, node_id: str) -> None:
+def _should_defer_selection_side_panels(self) -> bool:
+    """True while a canvas pointer gesture still owns the UI thread."""
+    if self._is_canvas_interacting():
+        return True
+    return getattr(self._canvas, "_primary_object", None) is not None
+
+
+def _apply_canvas_node_selection_side_panels(self, node_id: str) -> None:
     with profile_action(
         "knowledge.graph_tab.selection",
         phase="node_selected",
@@ -164,13 +171,42 @@ def _on_canvas_node_selected(self, node_id: str) -> None:
         with _preserve_selection_layout(self):
             try:
                 node = self._session.get_node(node_id)
-                node = self._properties.prepare_node_for_display(node)
             except KeyError:
                 self._properties.clear()
                 self._connections_panel.set_node(None)
                 return
-            self._properties.set_node(node)
+            # Selection is read-only: populate side panels without drift repair
+            # or other KB mutations (those belong on explicit open/edit paths).
+            self._properties.set_node(node, full_layout_sync=False)
             self._connections_panel.set_node(node)
+
+
+def _schedule_deferred_selection_side_panels(self) -> None:
+    if getattr(self, "_selection_side_panel_flush_scheduled", False):
+        return
+    self._selection_side_panel_flush_scheduled = True
+    QTimer.singleShot(0, self._flush_deferred_selection_side_panels)
+
+
+def _flush_deferred_selection_side_panels(self) -> None:
+    self._selection_side_panel_flush_scheduled = False
+    if self._should_defer_selection_side_panels():
+        self._schedule_deferred_selection_side_panels()
+        return
+    node_id = getattr(self, "_pending_selection_side_panel_node_id", None)
+    if node_id is None:
+        return
+    self._pending_selection_side_panel_node_id = None
+    self._apply_canvas_node_selection_side_panels(node_id)
+
+
+def _on_canvas_node_selected(self, node_id: str) -> None:
+    self._pending_selection_side_panel_node_id = node_id
+    self._schedule_deferred_selection_side_panels()
+
+
+def _on_canvas_pointer_gesture_finished(self) -> None:
+    self._flush_deferred_selection_side_panels()
 
 
 def _on_canvas_link_selected(self, _link_id: str) -> None:
@@ -186,7 +222,7 @@ def _on_canvas_link_selected(self, _link_id: str) -> None:
 
 def _on_canvas_selection_changed(self) -> None:
     """Keep inspector in sync when active selection is cleared."""
-    if self._canvas.active_selected_item() is not None:
+    if self._canvas.active_selected_object() is not None:
         return
     with profile_action(
         "knowledge.graph_tab.selection",
@@ -209,11 +245,12 @@ def _on_canvas_selection_model_changed(
         active_id, str) else None
     self._layout_ribbon.set_selection_count(len(self._selected_canvas_ids))
     self._instance_palette.set_active_selection(self._active_canvas_id)
-    self._queue_canvas_viewport_sidecar_write()
+    # Selection is sidecar-only and changes on every click — do not persist it
+    # here; per-click viewport writes trigger live-reload scans and UI hitches.
 
 
 def _wire_node_card_actions(self) -> None:
-    for item in self._canvas._local_node_items.values():  # noqa: SLF001
+    for item in self._canvas._local_node_objects.values():  # noqa: SLF001
         item.configure_actions(
             on_save=None,
             on_revert=None,
@@ -232,7 +269,7 @@ def _refresh_graph_validation_badges(self, changed_ids: set[str] | None = None) 
     nodes_by_id = {
         str(node.id): node for node in self._session.list_nodes()}
     validator = InstanceValidator(self._session._repository)  # noqa: SLF001
-    for item in self._canvas._local_node_items.values():  # noqa: SLF001
+    for item in self._canvas._local_node_objects.values():  # noqa: SLF001
         if changed_filter is not None and item.node_id not in changed_filter:
             continue
         node = nodes_by_id.get(item.node_id)
@@ -306,13 +343,13 @@ def _selected_graph_node_local_ids(self) -> list[str]:
         return []
     selected_node_items = [
         item
-        for item in self._canvas.selected_items()
-        if isinstance(item, QKnowledgeGraphNodeCanvasItem)
+        for item in self._canvas.selected_objects()
+        if isinstance(item, QKnowledgeGraphNodeCanvasObject)
     ]
     selected_node_item_set = set(selected_node_items)
     return [
         local_id
-        for local_id, item in self._canvas._local_node_items.items()  # noqa: SLF001
+        for local_id, item in self._canvas._local_node_objects.items()  # noqa: SLF001
         if item in selected_node_item_set
     ]
 
@@ -344,15 +381,15 @@ def _graph_view_without_local_ids(
 def _selected_graph_edge_local_ids(self) -> list[str]:
     if self._current_graph_view is None:
         return []
-    selected_edge_items = [
+    selected_edge_objects = [
         item
-        for item in self._canvas.selected_items()
-        if isinstance(item, QKnowledgeGraphLinkCanvasItem)
+        for item in self._canvas.selected_objects()
+        if isinstance(item, QKnowledgeGraphLinkCanvasObject)
     ]
-    selected_edge_item_set = set(selected_edge_items)
+    selected_edge_item_set = set(selected_edge_objects)
     return [
         local_id
-        for local_id, item in self._canvas._edge_items.items()  # noqa: SLF001
+        for local_id, item in self._canvas._edge_objects.items()  # noqa: SLF001
         if item in selected_edge_item_set
     ]
 
@@ -439,7 +476,7 @@ def _on_delete_selected_nodes(self, delete_knowledge_objects: bool = False) -> N
 
                         self._apply_graph_repo_mutation(
                             "graph_tab_delete_selected_links", _mutate)
-                    CanvasIO.save_graph_view(self._session._io, new_view)  # noqa: SLF001
+                    self._session.save_graph_view(new_view)
 
                 self._current_graph_view = new_view
                 self._current_graph_view_id = str(new_view.id)
@@ -461,7 +498,7 @@ def _on_delete_selected_nodes(self, delete_knowledge_objects: bool = False) -> N
     if not selected_node_ids:
         return
 
-    impact = self._session._io.preview_delete_nodes(selected_node_ids)  # noqa: SLF001
+    impact = self._session.preview_delete_nodes(selected_node_ids)
     new_view = self._graph_view_without_local_ids(set(selected_local_ids))
     if new_view is None:
         return
@@ -485,7 +522,7 @@ def _on_delete_selected_nodes(self, delete_knowledge_objects: bool = False) -> N
         with self._own_repo_write_scope():
             self._apply_graph_repo_mutation(
                 "graph_tab_delete_selection", _mutate)
-            CanvasIO.save_graph_view(self._session._io, new_view)  # noqa: SLF001
+            self._session.save_graph_view(new_view)
         self._session.notify_repository_mutated("graph_view")
         self._current_graph_view = new_view
         self._current_graph_view_id = str(new_view.id)
@@ -502,9 +539,9 @@ def _on_delete_selected_nodes(self, delete_knowledge_objects: bool = False) -> N
 
 
 def _select_canvas_node(self, node_id: str) -> None:
-    for item in reversed(list(self._canvas._local_node_items.values())):  # noqa: SLF001
+    for item in reversed(list(self._canvas._local_node_objects.values())):  # noqa: SLF001
         if item.node_id == node_id:
-            self._canvas.select_item(item, additive=False)
+            self._canvas.select_object(item, additive=False)
             return
 
 
@@ -514,9 +551,9 @@ def _on_inspector_node_selection_requested(self, node_id: str) -> None:
     if node_id not in {
         proxy.global_id for proxy in self._current_graph_view.nodes.values()
     }:
-        active_item = self._canvas.active_selected_item()
-        if isinstance(active_item, QKnowledgeGraphNodeCanvasItem):
-            bounds = active_item.bounds()
+        active_object = self._canvas.active_selected_object()
+        if isinstance(active_object, QKnowledgeGraphNodeCanvasObject):
+            bounds = active_object.bounds()
             self._on_instance_dropped(
                 node_id, bounds.x0 + 40.0, bounds.y0 + 40.0)
         else:
@@ -525,9 +562,9 @@ def _on_inspector_node_selection_requested(self, node_id: str) -> None:
 
 
 def _select_canvas_link(self, link_id: str) -> None:
-    for item in self._canvas._edge_items.values():  # noqa: SLF001
+    for item in self._canvas._edge_objects.values():  # noqa: SLF001
         if item.link_id == link_id:
-            self._canvas.select_item(item, additive=False)
+            self._canvas.select_object(item, additive=False)
             return
 
 
@@ -546,7 +583,12 @@ def _on_validation_focus_requested(self, node_id: str) -> None:
 
 
 def install_hit_test_helpers(cls) -> None:
+    cls._should_defer_selection_side_panels = _should_defer_selection_side_panels
+    cls._apply_canvas_node_selection_side_panels = _apply_canvas_node_selection_side_panels
+    cls._schedule_deferred_selection_side_panels = _schedule_deferred_selection_side_panels
+    cls._flush_deferred_selection_side_panels = _flush_deferred_selection_side_panels
     cls._on_canvas_node_selected = _on_canvas_node_selected
+    cls._on_canvas_pointer_gesture_finished = _on_canvas_pointer_gesture_finished
     cls._on_canvas_link_selected = _on_canvas_link_selected
     cls._on_canvas_selection_changed = _on_canvas_selection_changed
     cls._on_canvas_selection_model_changed = _on_canvas_selection_model_changed

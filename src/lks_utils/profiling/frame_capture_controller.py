@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Callable
 from lks_utils.profiling.frame_sample import FrameSample
 
 if TYPE_CHECKING:
-    from lks_utils.gui_qt.canvas2d.canvas2d_renderer import FrameTimings
+    from lks_utils.gui_qt.canvas2d.render.canvas_renderer import FrameTimings
 
 
 @dataclass(frozen=True)

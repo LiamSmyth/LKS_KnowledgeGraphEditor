@@ -14,7 +14,7 @@ from lks_utils.knowledge.links.link_instance import LinkInstance
 from lks_utils.knowledge.links.link_type import SLOT_REF_LINK_TYPE_ID
 from lks_utils.knowledge.models.node_id import NodeId
 from lks_utils.knowledge.models.node import Node
-from lks_utils.knowledge.models.node_slot import NodeSlot, SlotSource
+from lks_utils.knowledge.models.node_slot import NodeSlot, PropertyValueMode, SlotSource
 from lks_utils.knowledge.models.type import as_type
 from lks_utils.knowledge.instance_validator import PROTOTYPE_ID_PROP
 from lks_utils.knowledge.repository import Repository
@@ -353,6 +353,36 @@ class Mutator:
         the editor can keep malformed data visible instead of dropping the write.
         """
         node = self._repository.get(node_id)
+        if node.type_id is not None or PROTOTYPE_ID_PROP in node.props:
+            self._require_instance_schema_slot(node, slot_name)
+        slot_contract = self._get_slot_contract(node, slot_name)
+        if (
+            slot_contract is not None
+            and slot_contract.effective_value_mode() == PropertyValueMode.REF_OR_INLINE
+        ):
+            if self._is_reference_payload(value):
+                target_ids = self._extract_ref_targets(value)
+                if len(target_ids) > 1:
+                    raise ValueError(
+                        f"Property {slot_name!r} expects a single reference target"
+                    )
+                self._replace_slot_ref_links(
+                    str(node_id), slot_name, target_ids)
+                if slot_name in node.props:
+                    cleaned = dict(node.props)
+                    cleaned.pop(slot_name)
+                    self._repository.upsert(
+                        node.model_copy(
+                            update={"props": cleaned, "rev": node.rev + 1})
+                    )
+                return
+
+            # Inline branch for REF_OR_INLINE: clear stale slot_ref links and
+            # persist the inline value in props.
+            self._clear_slot_ref_links(str(node_id), slot_name)
+            self._set_literal_slot_value(node, slot_name, value)
+            return
+
         slot_source = self._get_slot_source(node, slot_name)
 
         if slot_source in (SlotSource.REF, SlotSource.REF_LIST):
@@ -373,30 +403,7 @@ class Mutator:
                 )
             return
 
-        updated_props = dict(node.props)
-        updated_props[slot_name] = value
-        validation_errors = self._validation_errors(updated_props)
-        validation_errors.pop(slot_name, None)
-
-        if node.type_id is not None:
-            validator = InstanceValidator(self._repository)
-            updated_node = node.model_copy(
-                update={"props": updated_props, "rev": node.rev + 1})
-            try:
-                validator.validate_node(updated_node)
-            except ValueError as exc:
-                validation_errors[slot_name] = str(exc)
-
-        if validation_errors:
-            updated_props[VALIDATION_STATUS_PROP] = VALIDATION_STATUS_CANNOT_COMPILE
-            updated_props[VALIDATION_ERRORS_PROP] = validation_errors
-        else:
-            for key in RESERVED_VALIDATION_PROP_NAMES:
-                updated_props.pop(key, None)
-
-        updated_node = node.model_copy(
-            update={"props": updated_props, "rev": node.rev + 1})
-        self._repository.upsert(updated_node)
+        self._set_literal_slot_value(node, slot_name, value)
 
     def discard_slot_value(self, node_id: str | NodeId, slot_name: str) -> None:
         """Drop one slot value and clear stale validation metadata for that slot.
@@ -454,6 +461,61 @@ class Mutator:
                     return slot.source
         return None
 
+    def _get_slot_contract(self, node: Node, slot_name: str) -> NodeSlot | None:
+        """Return the merged slot contract for *slot_name* from the node's type."""
+        if node.type_id is None:
+            return None
+        try:
+            type_node = self._repository.get(node.type_id)
+        except KeyError:
+            return None
+        resolver = Resolver(self._repository)
+        chain = resolver.fetch_parent_chain(type_node) + [type_node]
+        for candidate in reversed(chain):
+            for slot in as_type(candidate).slots:
+                if slot.name == slot_name:
+                    return slot
+        return None
+
+    def _is_reference_payload(self, value: object) -> bool:
+        """Return True when *value* encodes a reference payload shape."""
+        if value is None:
+            return True
+        try:
+            self._extract_ref_targets(value)
+            return True
+        except ValueError:
+            return False
+
+    def _set_literal_slot_value(self, node: Node, slot_name: str, value: object) -> None:
+        """Persist a literal/inline slot value with validation metadata updates."""
+        updated_props = dict(node.props)
+        updated_props[slot_name] = value
+        validation_errors = self._validation_errors(updated_props)
+        validation_errors.pop(slot_name, None)
+
+        if node.type_id is not None:
+            validator = InstanceValidator(self._repository)
+            updated_node = node.model_copy(
+                update={"props": updated_props, "rev": node.rev + 1})
+            try:
+                validator.validate_node(updated_node)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Cannot set slot {slot_name!r}: {exc}"
+                ) from exc
+
+        if validation_errors:
+            updated_props[VALIDATION_STATUS_PROP] = VALIDATION_STATUS_CANNOT_COMPILE
+            updated_props[VALIDATION_ERRORS_PROP] = validation_errors
+        else:
+            for key in RESERVED_VALIDATION_PROP_NAMES:
+                updated_props.pop(key, None)
+
+        updated_node = node.model_copy(
+            update={"props": updated_props, "rev": node.rev + 1})
+        self._repository.upsert(updated_node)
+
     def _find_inherited_type_slot(self, type_node: Node, slot_name: str) -> NodeSlot | None:
         """Return inherited parent slot contract for *slot_name*, if present."""
         resolver = Resolver(self._repository)
@@ -495,12 +557,26 @@ class Mutator:
         """Normalize REF/REF_LIST value to canonical node-id strings."""
         if value is None:
             return []
+        if isinstance(value, dict):
+            # MCP/UI wrappers: {"target_node_id": "..."} or {"$ref": "..."}
+            for key in ("target_node_id", "$ref"):
+                raw = value.get(key)
+                if isinstance(raw, str):
+                    stripped = raw.strip()
+                    return [stripped] if stripped else []
+            raise ValueError(
+                "Reference dict payload must include string 'target_node_id' or '$ref'"
+            )
         if isinstance(value, str):
             stripped = value.strip()
             return [stripped] if stripped else []
         if isinstance(value, (list, tuple)):
             result: list[str] = []
             for item in value:
+                if isinstance(item, dict):
+                    nested = self._extract_ref_targets(item)
+                    result.extend(nested)
+                    continue
                 if not isinstance(item, str):
                     raise ValueError(
                         "Reference list values must contain node-id strings only"

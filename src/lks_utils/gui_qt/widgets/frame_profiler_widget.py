@@ -58,7 +58,7 @@ from lks_utils.profiling.ui import (
 from lks_utils.profiling.ui.perf_gradient_mapper import PerfGradientMapper
 
 if TYPE_CHECKING:
-    from lks_utils.gui_qt.canvas2d.canvas2d_renderer import FrameTimings
+    from lks_utils.gui_qt.canvas2d.render.canvas_renderer import FrameTimings
 
 _RING_SIZE: int = 240
 _DEFAULT_BUDGET_MS: float = 16.6
